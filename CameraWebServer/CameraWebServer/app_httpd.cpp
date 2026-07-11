@@ -27,6 +27,7 @@
 extern I2SClass audioI2S;
 extern bool audioReady;
 extern bool oledReady;
+extern bool micStreaming;
 extern void showOLED(const String &line1, const String &line2, const String &line3, const String &line4);
 
 #if defined(ARDUINO_ARCH_ESP32) && defined(CONFIG_ARDUHAL_ESP_LOG)
@@ -761,6 +762,63 @@ static esp_err_t oled_handler(httpd_req_t *req) {
   return httpd_resp_send(req, NULL, 0);
 }
 
+static esp_err_t mic_handler(httpd_req_t *req) {
+  if (!audioReady) {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Audio not ready");
+    return ESP_FAIL;
+  }
+
+  micStreaming = true;
+  httpd_resp_set_type(req, "audio/x-raw");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+  int32_t temp_buf[256];
+  int16_t out_buf[128];
+
+  while (true) {
+    size_t bytesRead = audioI2S.readBytes(
+      reinterpret_cast<char *>(temp_buf),
+      sizeof(temp_buf)
+    );
+    size_t samplesRead = bytesRead / sizeof(int32_t);
+
+    if (samplesRead == 0) {
+      delay(5);
+      continue;
+    }
+
+    size_t out_count = 0;
+    // Extract Left channel (even index) and convert 32-bit sample to 16-bit
+    for (size_t i = 0; i < samplesRead; i += 2) {
+      int32_t sample32 = temp_buf[i];
+      int16_t sample16 = (int16_t)(sample32 >> 16);
+      out_buf[out_count++] = sample16;
+    }
+
+    // Update real-time mic level for display
+    uint64_t sum = 0;
+    for (size_t i = 0; i < out_count; i++) {
+      int16_t s = out_buf[i];
+      if (s < 0) s = -s;
+      sum += s;
+    }
+    if (out_count > 0) {
+      extern uint32_t lastMicLevel;
+      lastMicLevel = sum / out_count;
+    }
+
+    esp_err_t err = httpd_resp_send_chunk(req, (const char *)out_buf, out_count * sizeof(int16_t));
+    if (err != ESP_OK) {
+      break;
+    }
+  }
+
+  micStreaming = false;
+  httpd_resp_send_chunk(req, NULL, 0);
+  return ESP_OK;
+}
+
+
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = 16;
@@ -935,6 +993,19 @@ void startCameraServer() {
 #endif
   };
 
+  httpd_uri_t mic_uri = {
+    .uri = "/mic",
+    .method = HTTP_GET,
+    .handler = mic_handler,
+    .user_ctx = NULL
+#ifdef CONFIG_HTTPD_WS_SUPPORT
+    ,
+    .is_websocket = false,
+    .handle_ws_control_frames = false,
+    .supported_subprotocol = NULL
+#endif
+  };
+
   ra_filter_init(&ra_filter, 20);
 
   log_i("Starting web server on port: '%u'", config.server_port);
@@ -946,6 +1017,7 @@ void startCameraServer() {
     httpd_register_uri_handler(camera_httpd, &bmp_uri);
     httpd_register_uri_handler(camera_httpd, &play_uri);
     httpd_register_uri_handler(camera_httpd, &oled_uri);
+    httpd_register_uri_handler(camera_httpd, &mic_uri);
 
     httpd_register_uri_handler(camera_httpd, &xclk_uri);
     httpd_register_uri_handler(camera_httpd, &reg_uri);

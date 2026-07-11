@@ -531,37 +531,71 @@ def start_tts_worker(camera_source):
 
 
 class MicrophoneRecorder:
-    """Record mono audio from the system microphone in a background thread."""
+    """Record mono audio from either the system microphone or the ESP32 network microphone."""
 
-    def __init__(self, sample_rate: int = 16000, device=None):
+    def __init__(self, sample_rate: int = 16000, device=None, esp_ip=None):
         self._sample_rate = sample_rate
         self._device = device
+        self._esp_ip = esp_ip
         self._frames: list[np.ndarray] = []
         self._stream = None
         self._recording = False
+        self._thread = None
 
     @property
     def recording(self) -> bool:
         return self._recording
 
     def start(self):
-        import sounddevice as sd
-
         self._frames = []
         self._recording = True
-        self._stream = sd.InputStream(
-            samplerate=self._sample_rate,
-            channels=1,
-            dtype="float32",
-            device=self._device,
-            callback=self._callback,
-        )
-        self._stream.start()
+
+        if self._esp_ip:
+            # Record from ESP32 I2S microphone via HTTP stream
+            self._thread = threading.Thread(
+                target=self._record_esp32,
+                name="esp32-mic-recorder",
+                daemon=True
+            )
+            self._thread.start()
+        else:
+            # Record from local system microphone using sounddevice
+            import sounddevice as sd
+            self._stream = sd.InputStream(
+                samplerate=self._sample_rate,
+                channels=1,
+                dtype="float32",
+                device=self._device,
+                callback=self._callback,
+            )
+            self._stream.start()
 
     def _callback(self, indata, frame_count, time_info, status):
         if status:
             logger.warning("Microphone status: %s", status)
         self._frames.append(indata.copy())
+
+    def _record_esp32(self):
+        import requests
+        url = f"http://{self._esp_ip}/mic"
+        logger.info("Connecting to ESP32 microphone stream: %s", url)
+        try:
+            # Use stream=True to read chunks as they arrive
+            resp = requests.get(url, stream=True, timeout=5.0)
+            if resp.status_code != 200:
+                logger.error("ESP32 microphone stream returned status %d", resp.status_code)
+                return
+
+            for chunk in resp.iter_content(chunk_size=1024):
+                if not self._recording:
+                    break
+                if chunk:
+                    # Convert 16-bit PCM bytes to float32 array
+                    arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                    self._frames.append(arr.reshape(-1, 1))
+
+        except Exception as e:
+            logger.warning("Error reading ESP32 microphone stream: %s", e)
 
     def stop(self) -> Path | None:
         import soundfile as sf
@@ -572,6 +606,10 @@ class MicrophoneRecorder:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
 
         if not self._frames:
             return None
@@ -780,6 +818,15 @@ def run_camera(args):
     time.sleep(1)
     tts.put("Text to speech is ready")
 
+    # Parse ESP32 IP for OLED and Microphone stream
+    esp_ip = None
+    if isinstance(args.camera, str) and args.camera.startswith("http"):
+        from urllib.parse import urlparse as _urlparse
+        try:
+            esp_ip = _urlparse(args.camera).hostname
+        except Exception:
+            pass
+
     # Microphone recorder for speech input
     mic_device = None
     if hasattr(args, "audio_device") and args.audio_device is not None:
@@ -791,6 +838,7 @@ def run_camera(args):
     mic = MicrophoneRecorder(
         sample_rate=getattr(args, "sample_rate", 16000),
         device=mic_device,
+        esp_ip=esp_ip,
     )
     speech_recording = False
     s_release_count = 0
@@ -811,15 +859,6 @@ def run_camera(args):
             logger.info("Sent to OLED: %s", text)
         except Exception as e:
             logger.warning("Failed to send to OLED: %s", e)
-
-    # Parse ESP32 IP for OLED
-    esp_ip = None
-    if isinstance(args.camera, str) and args.camera.startswith("http"):
-        from urllib.parse import urlparse as _urlparse
-        try:
-            esp_ip = _urlparse(args.camera).hostname
-        except Exception:
-            pass
 
     session_active = False
     segment_active = False
