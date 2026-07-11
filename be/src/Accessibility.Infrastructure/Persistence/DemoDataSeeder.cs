@@ -11,6 +11,7 @@ public static class DemoDataSeeder
     private static readonly Guid DemoUserId = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid DemoConversationId = Guid.Parse("22222222-2222-2222-2222-222222222222");
     private static readonly Guid DemoTranscriptId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+    private const string DemoTranscriptText = "You need to go to Cho Ray Hospital tomorrow at 8 AM for your medical appointment. Please remember to bring your insurance card, and I can remind you 30 minutes before.";
 
     public static async Task SeedAsync(AccessibilityDbContext dbContext, CancellationToken cancellationToken = default)
     {
@@ -44,6 +45,7 @@ public static class DemoDataSeeder
             await dbContext.Conversations.AddAsync(conversation, cancellationToken);
         }
 
+        var transcriptChanged = false;
         var transcript = await dbContext.TranscriptSegments.FirstOrDefaultAsync(x => x.Id == DemoTranscriptId, cancellationToken);
         if (transcript is null)
         {
@@ -53,7 +55,7 @@ public static class DemoDataSeeder
                 ConversationId = DemoConversationId,
                 Speaker = Speaker.HearingUser,
                 Language = "en",
-                OriginalText = "Tomorrow at 8 AM I have a medical appointment at Cho Ray Hospital. Please remind me 30 minutes before. Also save a note that I need to bring my insurance card.",
+                OriginalText = DemoTranscriptText,
                 StartedAt = DateTimeOffset.UtcNow,
                 EndedAt = DateTimeOffset.UtcNow.AddSeconds(8),
                 SequenceNumber = 1
@@ -61,8 +63,26 @@ public static class DemoDataSeeder
 
             await dbContext.TranscriptSegments.AddAsync(transcript, cancellationToken);
         }
+        else if (transcript.OriginalText != DemoTranscriptText)
+        {
+            transcript.OriginalText = DemoTranscriptText;
+            transcriptChanged = true;
+        }
 
-        var hasAnalysis = await dbContext.AgentAnalyses.AnyAsync(x => x.TranscriptSegmentId == DemoTranscriptId, cancellationToken);
+        if (transcriptChanged)
+        {
+            var demoActions = await dbContext.ProposedActions
+                .Where(x => x.ConversationId == DemoConversationId)
+                .ToListAsync(cancellationToken);
+            dbContext.ProposedActions.RemoveRange(demoActions);
+
+            var demoAnalyses = await dbContext.AgentAnalyses
+                .Where(x => x.TranscriptSegmentId == DemoTranscriptId)
+                .ToListAsync(cancellationToken);
+            dbContext.AgentAnalyses.RemoveRange(demoAnalyses);
+        }
+
+        var hasAnalysis = !transcriptChanged && await dbContext.AgentAnalyses.AnyAsync(x => x.TranscriptSegmentId == DemoTranscriptId, cancellationToken);
         var outboxPayload = JsonSerializer.Serialize(new TranscriptReceived(DemoTranscriptId));
         var hasPendingOutbox = await dbContext.OutboxMessages.AnyAsync(
             x => x.Type == typeof(TranscriptReceived).AssemblyQualifiedName && x.Payload == outboxPayload && x.ProcessedAt == null,

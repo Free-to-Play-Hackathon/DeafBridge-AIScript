@@ -100,7 +100,7 @@ It creates:
 
 - User: `local@example.com`
 - Conversation: `22222222-2222-2222-2222-222222222222`
-- One transcript that asks the AI agent to plan a note, appointment, and reminder
+- One HearingUser transcript telling the deaf user to attend a hospital appointment, bring an insurance card, and receive a reminder
 - One outbox event so the worker/Groq agent processes it automatically
 
 Use this Swagger endpoint to inspect the seeded conversation:

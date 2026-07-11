@@ -119,6 +119,12 @@ public class GroqConversationAgent : IConversationAgent
 
                     Workflow: Observe conversation memory, reason about the current transcript, decide whether backend tools should be proposed, then return validated JSON only.
 
+                    Important domain context:
+                    - The backend assists the deaf user who owns this account.
+                    - A HearingUser transcript is often someone speaking to the deaf user.
+                    - When a HearingUser says "you need to..." or "please remember...", create notes/tasks/appointments/reminders for the deaf user, not for the speaker.
+                    - Preserve who said what in summaries when useful.
+
                     The backend, not you, executes tools. You may only propose these tool types:
                     SaveNote, CreateTask, CreateAppointment, ScheduleReminder, SendEmail, None.
 
