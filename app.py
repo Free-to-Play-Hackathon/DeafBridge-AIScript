@@ -793,8 +793,33 @@ def run_camera(args):
         device=mic_device,
     )
     speech_recording = False
+    s_release_count = 0
     speech_transcripts: deque[str] = deque(maxlen=3)
     transcript_display_until = 0.0
+
+    # Helper to send text to ESP32 OLED
+    def send_to_oled(text: str):
+        if esp_ip is None:
+            return
+        try:
+            import requests as _req
+            _req.post(
+                f"http://{esp_ip}/oled",
+                data=text.encode("utf-8"),
+                timeout=2.0,
+            )
+            logger.info("Sent to OLED: %s", text)
+        except Exception as e:
+            logger.warning("Failed to send to OLED: %s", e)
+
+    # Parse ESP32 IP for OLED
+    esp_ip = None
+    if isinstance(args.camera, str) and args.camera.startswith("http"):
+        from urllib.parse import urlparse as _urlparse
+        try:
+            esp_ip = _urlparse(args.camera).hostname
+        except Exception:
+            pass
 
     session_active = False
     segment_active = False
@@ -1097,64 +1122,70 @@ def run_camera(args):
                     logger.info("Continuous recognition session stopped")
 
             # Hold S to record speech; release to stop and transcribe
-            if key == ord("s") and not speech_recording:
-                try:
-                    mic.start()
-                    speech_recording = True
-                    label = "LISTENING"
+            if key == ord("s"):
+                s_release_count = 0
+                if not speech_recording:
+                    try:
+                        mic.start()
+                        speech_recording = True
+                        label = "LISTENING"
+                        confidence = 0.0
+                        logger.info("Speech recording started (hold S)")
+                    except Exception:
+                        logger.exception("Failed to start microphone")
+
+            elif speech_recording:
+                s_release_count += 1
+                if s_release_count >= 5:
+                    speech_recording = False
+                    s_release_count = 0
+                    logger.info("Speech recording stopped (S released)")
+                    label = "TRANSCRIBING"
                     confidence = 0.0
-                    logger.info("Speech recording started (hold S)")
-                except Exception:
-                    logger.exception("Failed to start microphone")
 
-            elif key != ord("s") and speech_recording:
-                speech_recording = False
-                logger.info("Speech recording stopped (S released)")
-                label = "TRANSCRIBING"
-                confidence = 0.0
+                    try:
+                        audio_path = mic.stop()
 
-                try:
-                    audio_path = mic.stop()
-
-                    if audio_path:
-                        logger.info("Transcribing audio")
-                        speech_lang = getattr(
-                            args, "speech_language", "en"
-                        )
-                        text = transcribe_audio_file(
-                            audio_path,
-                            language=speech_lang,
-                        )
-
-                        # Clean up temp file
-                        try:
-                            audio_path.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-
-                        if text:
-                            logger.info("Transcript: %s", text)
-                            state.add(
-                                "speech",
-                                text,
-                                {"language": speech_lang},
+                        if audio_path:
+                            logger.info("Transcribing audio")
+                            speech_lang = getattr(
+                                args, "speech_language", "en"
                             )
-                            speech_transcripts.append(text)
-                            transcript_display_until = (
-                                time.monotonic() + 8.0
+                            text = transcribe_audio_file(
+                                audio_path,
+                                language=speech_lang,
                             )
-                            label = "SPEECH OK"
-                            tts.put(text)
+
+                            # Clean up temp file
+                            try:
+                                audio_path.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+
+                            if text:
+                                logger.info("Transcript: %s", text)
+                                state.add(
+                                    "speech",
+                                    text,
+                                    {"language": speech_lang},
+                                )
+                                speech_transcripts.append(text)
+                                transcript_display_until = (
+                                    time.monotonic() + 8.0
+                                )
+                                label = "SPEECH OK"
+                                # Show on ESP32 OLED instead of speaking back
+                                send_to_oled(text)
+                            else:
+                                label = "NO SPEECH"
                         else:
                             label = "NO SPEECH"
-                    else:
-                        label = "NO SPEECH"
 
-                except Exception:
-                    logger.exception(
-                        "Speech transcription failed"
-                    )
-                    label = "MIC ERROR"
+                    except Exception:
+                        logger.exception(
+                            "Speech transcription failed"
+                        )
+                        label = "MIC ERROR"
 
     finally:
         shutdown_event.set()
