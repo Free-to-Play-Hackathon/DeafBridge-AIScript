@@ -764,6 +764,13 @@ class LatestFrameCamera:
         self._thread.join(timeout=3.0)
 
 
+class TranscriptEvent:
+    def __init__(self, partial_text: str, final_text: str, timestamp: float, language: str):
+        self.partial_text = partial_text
+        self.final_text = final_text
+        self.timestamp = timestamp
+        self.language = language
+
 def run_camera(args):
     torch.set_num_threads(max(1, args.torch_threads))
 
@@ -835,16 +842,6 @@ def run_camera(args):
         except ValueError:
             mic_device = args.audio_device
 
-    mic = MicrophoneRecorder(
-        sample_rate=getattr(args, "sample_rate", 16000),
-        device=mic_device,
-        esp_ip=esp_ip,
-    )
-    speech_recording = False
-    s_release_count = 0
-    speech_transcripts: deque[str] = deque(maxlen=3)
-    transcript_display_until = 0.0
-
     # Helper to send text to ESP32 OLED
     def send_to_oled(text: str):
         if esp_ip is None:
@@ -860,27 +857,29 @@ def run_camera(args):
         except Exception as e:
             logger.warning("Failed to send to OLED: %s", e)
 
+    # Queues for pipeline
+    audio_raw_queue = queue.Queue()
+    whisper_task_queue = queue.Queue()
+    transcript_queue = queue.Queue()
+
+    # Shared structures
+    landmarks_lock = threading.Lock()
+    latest_landmarks = []
+    
+    speech_transcripts: deque[str] = deque(maxlen=3)
+    current_partial_text = ""
+    transcript_display_until = 0.0
+
+    speech_active = False
     session_active = False
     segment_active = False
+    
+    label = "READY"
+    confidence = 0.0
     sequence = []
     detected = 0
     segment_started_at = None
     last_hand_at = None
-
-    label = "READY"
-    confidence = 0.0
-
-    last_frame_id = -1
-    last_result = None
-    last_features = np.zeros(RAW_FEATURES, dtype=np.float32)
-    last_mp_at = 0.0
-    mp_interval = 1.0 / max(1.0, args.mediapipe_fps)
-
-    fps_started = time.monotonic()
-    fps_frames = 0
-    display_fps = 0.0
-
-    last_stale_logged_at = 0.0
 
     def reset_segment():
         nonlocal segment_active, sequence, detected, segment_started_at, last_hand_at
@@ -890,180 +889,323 @@ def run_camera(args):
         segment_started_at = None
         last_hand_at = None
 
-    def predict_segment():
-        nonlocal label, confidence
+    # Audio Thread
+    def audio_thread_func():
+        esp_failed_last = False
+        last_esp_retry = 0.0
 
-        if detected < min_frames:
-            label = "TRY AGAIN"
-            logger.info(
-                "Segment ignored: only %d/%d hand frames",
-                detected,
-                min_frames,
+        while not shutdown_event.is_set():
+            if esp_ip and not esp_failed_last:
+                import requests
+                url = f"http://{esp_ip}/mic"
+                logger.info("Audio Thread: Connecting to ESP32 mic stream: %s", url)
+                try:
+                    resp = requests.get(url, stream=True, timeout=5.0)
+                    if resp.status_code == 200:
+                        logger.info("Audio Thread: Connected to ESP32 mic stream")
+                        sample_buf = []
+                        for chunk in resp.iter_content(chunk_size=512):
+                            if shutdown_event.is_set():
+                                break
+                            if chunk:
+                                arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                                sample_buf.extend(arr)
+                                while len(sample_buf) >= 512:
+                                    chunk512 = np.array(sample_buf[:512], dtype=np.float32)
+                                    audio_raw_queue.put(chunk512)
+                                    sample_buf = sample_buf[512:]
+                        resp.close()
+                        continue
+                    else:
+                        logger.error("Audio Thread: ESP32 HTTP %d, using local mic fallback", resp.status_code)
+                        esp_failed_last = True
+                        last_esp_retry = time.monotonic()
+                except Exception as e:
+                    logger.warning("Audio Thread: ESP32 mic error: %s, using local mic fallback", e)
+                    esp_failed_last = True
+                    last_esp_retry = time.monotonic()
+
+            logger.info("Audio Thread: Starting local mic capture (sounddevice)")
+            import sounddevice as sd
+            
+            def sd_callback(indata, frames, time_info, status):
+                if status:
+                    logger.warning("Local mic status: %s", status)
+                audio_raw_queue.put(indata.flatten().copy())
+
+            try:
+                stream = sd.InputStream(
+                    samplerate=16000,
+                    channels=1,
+                    dtype="float32",
+                    blocksize=512,
+                    device=mic_device,
+                    callback=sd_callback,
+                )
+                with stream:
+                    while not shutdown_event.is_set():
+                        if esp_ip and esp_failed_last:
+                            if time.monotonic() - last_esp_retry > 8.0:
+                                logger.info("Audio Thread: Retrying ESP32 mic...")
+                                try:
+                                    import requests as _r
+                                    test_resp = _r.get(f"http://{esp_ip}/mic", stream=True, timeout=2.0)
+                                    if test_resp.status_code == 200:
+                                        test_resp.close()
+                                        logger.info("Audio Thread: ESP32 mic back online, switching...")
+                                        esp_failed_last = False
+                                        break
+                                except Exception:
+                                    last_esp_retry = time.monotonic()
+                        time.sleep(0.1)
+            except Exception as e:
+                logger.error("Audio Thread: Failed to start local microphone: %s", e)
+                time.sleep(2.0)
+
+    # VAD Thread
+    def vad_thread_func():
+        nonlocal speech_active
+        from silero_vad import load_silero_vad
+        logger.info("VAD Thread: Loading Silero VAD...")
+        vad_model = load_silero_vad()
+        logger.info("VAD Thread: Silero VAD loaded.")
+        
+        speech_buffer = []
+        silence_frames = 0
+        max_silence_frames = 25 # 25 * 32ms = 800ms
+        speech_threshold = 0.5
+        
+        frames_since_partial = 0
+        partial_interval_frames = 12 
+        
+        while not shutdown_event.is_set():
+            try:
+                chunk = audio_raw_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+                
+            chunk_tensor = torch.from_numpy(chunk).unsqueeze(0)
+            with torch.no_grad():
+                prob = vad_model(chunk_tensor, 16000).item()
+                
+            is_speech = prob > speech_threshold
+            
+            if is_speech:
+                if not speech_active:
+                    speech_active = True
+                    speech_buffer = []
+                    silence_frames = 0
+                    frames_since_partial = 0
+                    logger.info("VAD: Speech started")
+                    
+                speech_buffer.append(chunk)
+                silence_frames = 0
+                frames_since_partial += 1
+                
+                if frames_since_partial >= partial_interval_frames:
+                    frames_since_partial = 0
+                    accumulated = np.concatenate(speech_buffer, axis=0)
+                    whisper_task_queue.put((accumulated, False))
+                    
+            else:
+                if speech_active:
+                    speech_buffer.append(chunk)
+                    silence_frames += 1
+                    frames_since_partial += 1
+                    
+                    if silence_frames >= max_silence_frames:
+                        speech_active = False
+                        logger.info("VAD: Speech ended (silence detected)")
+                        accumulated = np.concatenate(speech_buffer, axis=0)
+                        whisper_task_queue.put((accumulated, True))
+                        speech_buffer = []
+                        silence_frames = 0
+                        frames_since_partial = 0
+                    elif frames_since_partial >= partial_interval_frames:
+                        frames_since_partial = 0
+                        accumulated = np.concatenate(speech_buffer, axis=0)
+                        whisper_task_queue.put((accumulated, False))
+
+    # Whisper Thread
+    def whisper_thread_func():
+        global whisper_model, whisper_lock
+        
+        with whisper_lock:
+            if whisper_model is None:
+                cuda = torch.cuda.is_available()
+                logger.info("Whisper Thread: Initializing Whisper 'small.en' (cuda=%s)...", cuda)
+                whisper_model = WhisperModel(
+                    "small.en",
+                    device="cuda" if cuda else "cpu",
+                    compute_type="float16" if cuda else "int8"
+                )
+                logger.info("Whisper Thread: Whisper initialized.")
+                
+        while not shutdown_event.is_set():
+            try:
+                audio_samples, is_final = whisper_task_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+                
+            try:
+                with whisper_lock:
+                    segments, info = whisper_model.transcribe(
+                        audio_samples,
+                        beam_size=2,
+                        language="en",
+                        vad_filter=False
+                    )
+                    text = " ".join(s.text.strip() for s in segments).strip()
+                    
+                if is_final:
+                    event = TranscriptEvent(
+                        partial_text="",
+                        final_text=text,
+                        timestamp=time.time(),
+                        language="en"
+                    )
+                    transcript_queue.put(event)
+                else:
+                    event = TranscriptEvent(
+                        partial_text=text,
+                        final_text="",
+                        timestamp=time.time(),
+                        language="en"
+                    )
+                    transcript_queue.put(event)
+                    
+            except Exception as e:
+                logger.error("Whisper Thread: Transcription error: %s", e)
+
+    # Sign Thread
+    def sign_thread_func():
+        nonlocal label, confidence, segment_active, sequence, detected, last_hand_at, segment_started_at, latest_landmarks
+        last_frame_id = -1
+        last_mp_at = 0.0
+        mp_interval = 1.0 / max(1.0, args.mediapipe_fps)
+        
+        while not shutdown_event.is_set():
+            if not session_active:
+                time.sleep(0.01)
+                continue
+                
+            is_new, last_frame_id, frame = camera.read_latest(last_frame_id)
+            if not is_new:
+                time.sleep(0.005)
+                continue
+                
+            now = time.monotonic()
+            if now - last_mp_at < mp_interval:
+                time.sleep(0.002)
+                continue
+                
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            timestamp_ms = int(now * 1000)
+            
+            result = detector.detect_for_video(
+                mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb),
+                timestamp_ms
             )
-            return
+            last_mp_at = now
+            
+            features = frame_features(result, force_right_hand=not args.no_force_right)
+            hand_present = bool(result is not None and result.hand_landmarks and np.any(features != 0))
+            
+            with landmarks_lock:
+                latest_landmarks = []
+                if result and result.hand_landmarks:
+                    for landmarks in result.hand_landmarks:
+                        latest_landmarks.append([(p.x, p.y) for p in landmarks])
+                        
+            if hand_present:
+                last_hand_at = now
+                if not segment_active:
+                    segment_active = True
+                    segment_started_at = now
+                    sequence = []
+                    detected = 0
+                    label = "CAPTURING"
+                    confidence = 0.0
+                    logger.info("Gesture segment started")
+                    
+                sequence.append(features.copy())
+                detected += 1
+            elif segment_active:
+                sequence.append(features.copy())
+                gap = now - last_hand_at if last_hand_at is not None else 0.0
+                duration = now - segment_started_at if segment_started_at is not None else 0.0
+                
+                if gap >= args.segment_end_gap or duration >= args.max_segment_seconds:
+                    logger.info("Gesture segment ended: %d frames, %.2fs", len(sequence), duration)
+                    predict_segment()
+                    reset_segment()
 
-        x = prepare(sequence, length, mean, std)
+    # Start helper threads
+    threads = [
+        threading.Thread(target=audio_thread_func, name="audio-thread", daemon=True),
+        threading.Thread(target=vad_thread_func, name="vad-thread", daemon=True),
+        threading.Thread(target=whisper_thread_func, name="whisper-thread", daemon=True),
+        threading.Thread(target=sign_thread_func, name="sign-thread", daemon=True),
+    ]
+    for t in threads:
+        t.start()
 
-        with torch.inference_mode():
-            logits = model(torch.from_numpy(x).unsqueeze(0))
-            probs = torch.softmax(logits, dim=1)[0]
-
-        confidence = float(probs.max())
-        pred = int(probs.argmax())
-        intent = classes[pred]
-
-        if confidence < threshold:
-            label = "UNKNOWN"
-            logger.info(
-                "Prediction UNKNOWN; best=%s confidence=%.2f",
-                intent,
-                confidence,
-            )
-            return
-
-        label = intent.upper()
-        sentence = sentence_map.get(intent, {}).get(args.language, intent)
-
-        logger.info(
-            "Prediction %s confidence=%.2f sentence=%s",
-            intent,
-            confidence,
-            sentence,
-        )
-
-        state.add(
-            "sign",
-            sentence,
-            {
-                "intent": intent,
-                "confidence": confidence,
-            },
-        )
-        tts.put(sentence)
-
+    # Main UI loop
+    fps_started = time.monotonic()
+    fps_frames = 0
+    display_fps = 0.0
+    last_frame_id = -1
+    
     try:
         while not shutdown_event.is_set():
             is_new, last_frame_id, frame = camera.read_latest(last_frame_id)
-
             if not is_new:
-                age = camera.frame_age_seconds
-                if age != float("inf") and age > args.camera_stale_timeout:
-                    now = time.monotonic()
-                    if now - last_stale_logged_at >= 5.0:
-                        logger.warning(
-                            "No fresh camera frame for %.1f seconds",
-                            age,
-                        )
-                        last_stale_logged_at = now
                 time.sleep(0.002)
                 continue
-
+                
             now = time.monotonic()
-            should_run_mp = (
-                last_result is None
-                or now - last_mp_at >= mp_interval
-            )
-
-            if should_run_mp:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                timestamp_ms = int(now * 1000)
-
-                result = detector.detect_for_video(
-                    mp.Image(
-                        image_format=mp.ImageFormat.SRGB,
-                        data=rgb,
-                    ),
-                    timestamp_ms,
-                )
-
-                last_result = result
-                last_features = frame_features(
-                    result,
-                    force_right_hand=not args.no_force_right,
-                )
-                last_mp_at = now
-            else:
-                result = last_result
-
-            hand_present = bool(
-                result is not None
-                and result.hand_landmarks
-                and np.any(last_features != 0)
-            )
-
-            if session_active:
-                if hand_present:
-                    last_hand_at = now
-
-                    if not segment_active:
-                        segment_active = True
-                        segment_started_at = now
-                        sequence = []
-                        detected = 0
-                        label = "CAPTURING"
-                        confidence = 0.0
-                        logger.info("Gesture segment started")
-
-                    sequence.append(last_features.copy())
-                    detected += 1
-
-                elif segment_active:
-                    sequence.append(last_features.copy())
-
-                    gap = (
-                        now - last_hand_at
-                        if last_hand_at is not None
-                        else 0.0
-                    )
-                    duration = (
-                        now - segment_started_at
-                        if segment_started_at is not None
-                        else 0.0
-                    )
-
-                    if (
-                        gap >= args.segment_end_gap
-                        or duration >= args.max_segment_seconds
-                    ):
-                        logger.info(
-                            "Gesture segment ended: %d frames, %.2fs",
-                            len(sequence),
-                            duration,
-                        )
-                        predict_segment()
-                        reset_segment()
-
             h, w = frame.shape[:2]
-
-            if result is not None:
-                for landmarks in result.hand_landmarks or []:
-                    points = [
-                        (int(p.x * w), int(p.y * h))
-                        for p in landmarks
-                    ]
-
-                    for start_idx, end_idx in HAND_CONNECTIONS:
-                        if start_idx < len(points) and end_idx < len(points):
-                            cv2.line(
-                                frame,
-                                points[start_idx],
-                                points[end_idx],
-                                (0, 255, 0),
-                                1,
-                            )
-
-                    for point in points:
-                        cv2.circle(frame, point, 2, (255, 0, 255), -1)
-
+            
+            # Non-blocking get of transcript events
+            try:
+                while True:
+                    event = transcript_queue.get_nowait()
+                    if event.final_text:
+                        final_text = event.final_text
+                        logger.info("Final Speech: %s", final_text)
+                        state.add("speech", final_text, {"language": event.language})
+                        speech_transcripts.append(final_text)
+                        transcript_display_until = time.monotonic() + 8.0
+                        send_to_oled(final_text)
+                        current_partial_text = ""
+                    else:
+                        current_partial_text = event.partial_text
+                        transcript_display_until = time.monotonic() + 8.0
+            except queue.Empty:
+                pass
+                
+            # Draw hand landmarks
+            with landmarks_lock:
+                landmarks_to_draw = list(latest_landmarks)
+                
+            for landmarks in landmarks_to_draw:
+                points = [(int(x * w), int(y * h)) for x, y in landmarks]
+                for start_idx, end_idx in HAND_CONNECTIONS:
+                    if start_idx < len(points) and end_idx < len(points):
+                        cv2.line(frame, points[start_idx], points[end_idx], (0, 255, 0), 1)
+                for point in points:
+                    cv2.circle(frame, point, 2, (255, 0, 255), -1)
+                    
+            # Compute FPS
             fps_frames += 1
             elapsed = now - fps_started
-
             if elapsed >= 1.0:
                 display_fps = fps_frames / elapsed
                 fps_frames = 0
                 fps_started = now
-
-            if speech_recording:
+                
+            # Status overlays
+            if speech_active:
                 status_text = "LISTENING"
                 status_color = (0, 165, 255)
             elif segment_active:
@@ -1075,7 +1217,7 @@ def run_camera(args):
             else:
                 status_text = "READY"
                 status_color = (0, 255, 0)
-
+                
             cv2.putText(
                 frame,
                 status_text,
@@ -1103,11 +1245,10 @@ def run_camera(args):
                 (0, 255, 255),
                 2,
             )
-
-            # Control hints at bottom-right
+            
+            # UI control hints
             hints = [
                 "SPACE: Sign session",
-                "Hold S: Speech record",
                 "Q: Quit",
             ]
             for i, hint in enumerate(hints):
@@ -1120,11 +1261,16 @@ def run_camera(args):
                     (180, 180, 180),
                     1,
                 )
-
-            # Show speech transcripts overlay
-            if speech_transcripts and now < transcript_display_until:
+                
+            # Show speech transcripts
+            display_lines = list(speech_transcripts)
+            if current_partial_text:
+                display_lines.append(current_partial_text)
+            display_lines = display_lines[-3:]
+            
+            if display_lines and now < transcript_display_until:
                 y_offset = 95
-                for line in speech_transcripts:
+                for line in display_lines:
                     display_line = line if len(line) <= 60 else line[:57] + "..."
                     cv2.putText(
                         frame,
@@ -1136,100 +1282,29 @@ def run_camera(args):
                         1,
                     )
                     y_offset += 22
-
+                    
             cv2.imshow("Communication Assistant", frame)
             key = cv2.waitKey(1) & 0xFF
-
+            
             if key in (ord("q"), 27):
                 shutdown_event.set()
                 break
-
+                
             if key == 32:
                 session_active = not session_active
-
                 if session_active:
                     reset_segment()
                     label = "SESSION ON"
                     confidence = 0.0
                     logger.info("Continuous recognition session started")
                 else:
-                    if segment_active and detected >= min_frames:
-                        predict_segment()
                     reset_segment()
                     label = "READY"
                     confidence = 0.0
                     logger.info("Continuous recognition session stopped")
 
-            # Hold S to record speech; release to stop and transcribe
-            if key == ord("s"):
-                s_release_count = 0
-                if not speech_recording:
-                    try:
-                        mic.start()
-                        speech_recording = True
-                        label = "LISTENING"
-                        confidence = 0.0
-                        logger.info("Speech recording started (hold S)")
-                    except Exception:
-                        logger.exception("Failed to start microphone")
-
-            elif speech_recording:
-                s_release_count += 1
-                if s_release_count >= 5:
-                    speech_recording = False
-                    s_release_count = 0
-                    logger.info("Speech recording stopped (S released)")
-                    label = "TRANSCRIBING"
-                    confidence = 0.0
-
-                    try:
-                        audio_path = mic.stop()
-
-                        if audio_path:
-                            logger.info("Transcribing audio")
-                            speech_lang = getattr(
-                                args, "speech_language", "en"
-                            )
-                            text = transcribe_audio_file(
-                                audio_path,
-                                language=speech_lang,
-                            )
-
-                            # Clean up temp file
-                            try:
-                                audio_path.unlink(missing_ok=True)
-                            except Exception:
-                                pass
-
-                            if text:
-                                logger.info("Transcript: %s", text)
-                                state.add(
-                                    "speech",
-                                    text,
-                                    {"language": speech_lang},
-                                )
-                                speech_transcripts.append(text)
-                                transcript_display_until = (
-                                    time.monotonic() + 8.0
-                                )
-                                label = "SPEECH OK"
-                                # Show on ESP32 OLED instead of speaking back
-                                send_to_oled(text)
-                            else:
-                                label = "NO SPEECH"
-                        else:
-                            label = "NO SPEECH"
-
-                    except Exception:
-                        logger.exception(
-                            "Speech transcription failed"
-                        )
-                        label = "MIC ERROR"
-
     finally:
         shutdown_event.set()
-        if mic.recording:
-            mic.stop()
         camera.release()
         detector.close()
         tts.put(None)
