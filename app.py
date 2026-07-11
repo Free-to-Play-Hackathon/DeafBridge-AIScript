@@ -604,12 +604,13 @@ def run_camera(args):
             is_new, last_frame_id, frame = camera.read_latest(last_frame_id)
 
             if not is_new:
-                if camera.frame_age_seconds > args.camera_stale_timeout:
+                age = camera.frame_age_seconds
+                if age != float("inf") and age > args.camera_stale_timeout:
                     now = time.monotonic()
-                    if now - last_stale_logged_at >= 2.0:
+                    if now - last_stale_logged_at >= 5.0:
                         logger.warning(
                             "No fresh camera frame for %.1f seconds",
-                            camera.frame_age_seconds,
+                            age,
                         )
                         last_stale_logged_at = now
                 time.sleep(0.002)
