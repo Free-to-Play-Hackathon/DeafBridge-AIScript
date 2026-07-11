@@ -159,6 +159,53 @@ public class AgentAndActionTests
     }
 
     [Fact]
+    public async Task CohereAgent_ParsesJsonActionAsReminderAction()
+    {
+        var response = """
+        {
+          "id": "chat-1",
+          "finish_reason": "COMPLETE",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"detectedLanguage\":\"en\",\"translatedText\":\"Wake me up at 10 AM.\",\"summary\":\"The user asked for a wake-up reminder at 10 AM.\",\"category\":\"Reminder\",\"importance\":\"High\",\"suggestedReplies\":[\"I will remind you at 10 AM.\"],\"actions\":[{\"type\":\"ScheduleReminder\",\"title\":\"Wake up\",\"description\":\"Wake-up reminder at 10 AM.\",\"scheduledAt\":\"2026-07-12T10:00:00+07:00\",\"dueAt\":null,\"location\":null,\"recipientEmail\":null,\"requiresConfirmation\":true}]}"
+              }
+            ]
+          }
+        }
+        """;
+        var httpClientFactory = CreateHttpClientFactory(response);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["AI_PROVIDER"] = "cohere",
+                ["COHERE_API_KEY"] = "test-key",
+                ["AI_MODEL"] = "command-r7b-12-2024"
+            })
+            .Build();
+        var agent = new CohereConversationAgent(httpClientFactory.Object, configuration, NullLogger<CohereConversationAgent>.Instance);
+
+        var result = await agent.AnalyzeAsync(new AgentContext
+        {
+            TranscriptText = "Wake me up at 10 AM.",
+            Speaker = Speaker.HearingUser.ToString(),
+            Timestamp = DateTimeOffset.Parse("2026-07-12T08:00:00+07:00"),
+            UserTimeZone = "Asia/Ho_Chi_Minh"
+        }, CancellationToken.None);
+
+        result.ModelName.Should().Be("command-r7b-12-2024");
+        result.Category.Should().Be(AnalysisCategory.Reminder);
+        result.Importance.Should().Be(Importance.High);
+        result.Actions.Should().ContainSingle(action =>
+            action.Type == ActionType.ScheduleReminder &&
+            action.Title == "Wake up" &&
+            action.ScheduledAt == DateTimeOffset.Parse("2026-07-12T10:00:00+07:00") &&
+            action.RequiresConfirmation);
+    }
+
+    [Fact]
     public async Task ConfirmAction_WritesOutboxMessageWithoutPublishingDirectly()
     {
         await using var dbContext = CreateDbContext();
@@ -247,7 +294,7 @@ public class AgentAndActionTests
 
         var httpClientFactory = new Mock<IHttpClientFactory>();
         httpClientFactory
-            .Setup(x => x.CreateClient(nameof(OpenAIConversationAgent)))
+            .Setup(x => x.CreateClient(It.IsAny<string>()))
             .Returns(new HttpClient(handler.Object));
 
         return httpClientFactory;

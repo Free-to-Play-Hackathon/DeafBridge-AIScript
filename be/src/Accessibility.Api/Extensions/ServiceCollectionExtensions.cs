@@ -35,6 +35,11 @@ public static class ServiceCollectionExtensions
                 return ActivatorUtilities.CreateInstance<GroqConversationAgent>(sp);
             }
 
+            if (string.Equals(provider, "cohere", StringComparison.OrdinalIgnoreCase))
+            {
+                return ActivatorUtilities.CreateInstance<CohereConversationAgent>(sp);
+            }
+
             return new FakeConversationAgent();
         });
         services.AddSingleton<IEmailSender, SendGridEmailSender>();

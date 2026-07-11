@@ -26,6 +26,11 @@ builder.Services.AddSingleton<IConversationAgent>(sp =>
         return ActivatorUtilities.CreateInstance<GroqConversationAgent>(sp);
     }
 
+    if (string.Equals(provider, "cohere", StringComparison.OrdinalIgnoreCase))
+    {
+        return ActivatorUtilities.CreateInstance<CohereConversationAgent>(sp);
+    }
+
     return new FakeConversationAgent();
 });
 builder.Services.AddSingleton<IEmailSender, SendGridEmailSender>();
