@@ -327,6 +327,49 @@ def start_tts_worker():
     threading.Thread(target=worker,daemon=True).start()
     return items
 
+class LatestFrameCamera:
+    def __init__(self, source):
+        self.capture = cv2.VideoCapture(source)
+        self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.frame = None
+        self.running = True
+        self.new_frame_event = threading.Event()
+        self.lock = threading.Lock()
+        self.thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.thread.start()
+
+    def _capture_loop(self):
+        while self.running:
+            ok, frame = self.capture.read()
+            if not ok:
+                time.sleep(0.01)
+                continue
+            with self.lock:
+                self.frame = frame
+                self.new_frame_event.set()
+
+    def read(self):
+        if self.new_frame_event.wait(timeout=0.2):
+            with self.lock:
+                self.new_frame_event.clear()
+                if self.frame is None:
+                    return False, None
+                return True, self.frame.copy()
+        else:
+            with self.lock:
+                if self.frame is None:
+                    return False, None
+                return True, self.frame.copy()
+
+    def isOpened(self):
+        return self.capture.isOpened()
+
+    def release(self):
+        self.running = False
+        self.new_frame_event.set()
+        self.thread.join(timeout=1)
+        self.capture.release()
+
 def run_camera(args):
     checkpoint=torch.load(args.checkpoint,map_location="cpu",weights_only=False)
     config=checkpoint["config"]
@@ -365,7 +408,7 @@ def run_camera(args):
     detector=vision.HandLandmarker.create_from_options(options)
 
     source=int(args.camera) if str(args.camera).isdigit() else args.camera
-    cap=cv2.VideoCapture(source)
+    cap=LatestFrameCamera(source)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open camera: {source}")
 
@@ -376,18 +419,36 @@ def run_camera(args):
     label="READY"
     confidence=0.0
     frame_timestamp_ms = 0
+    frame_count = 0
+    last_result = None
 
     while True:
         ok,frame=cap.read()
         if not ok:
+            if frame is None:
+                time.sleep(0.01)
+                continue
             break
 
-        rgb=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
-        frame_timestamp_ms += 33
-        result=detector.detect_for_video(mp.Image(
-            image_format=mp.ImageFormat.SRGB,
-            data=rgb
-        ), frame_timestamp_ms)
+        frame_count += 1
+        run_mp = False
+        if recording:
+            run_mp = True
+        else:
+            if frame_count % 3 == 0:
+                run_mp = True
+
+        if run_mp or last_result is None:
+            rgb=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
+            frame_timestamp_ms += 33
+            result=detector.detect_for_video(mp.Image(
+                image_format=mp.ImageFormat.SRGB,
+                data=rgb
+            ), frame_timestamp_ms)
+            last_result = result
+        else:
+            result = last_result
+
         features=frame_features(result, force_right_hand=not args.no_force_right)
 
         if recording:
