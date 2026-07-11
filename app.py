@@ -516,56 +516,116 @@ def run_camera(args):
     camera=LatestFrameCamera(source)
     camera.wait_until_connected(args.camera_connect_timeout)
 
-    tts=start_tts_worker()
-    recording=False
-    sequence=[]
-    detected=0
-    label="READY"
-    confidence=0.0
+    tts = start_tts_worker()
 
-    last_frame_id=-1
-    frame_count=0
-    last_result=None
-    last_features=np.zeros(RAW_FEATURES,dtype=np.float32)
-    last_mp_at=0.0
-    mp_interval=1.0/max(1.0,args.mediapipe_fps)
+    session_active = False
+    segment_active = False
+    sequence = []
+    detected = 0
+    segment_started_at = None
+    last_hand_at = None
 
-    fps_started=time.monotonic()
-    fps_frames=0
-    display_fps=0.0
-    recording_started_at=None
+    label = "READY"
+    confidence = 0.0
 
-    last_stale_logged_at=0.0
+    last_frame_id = -1
+    last_result = None
+    last_features = np.zeros(RAW_FEATURES, dtype=np.float32)
+    last_mp_at = 0.0
+    mp_interval = 1.0 / max(1.0, args.mediapipe_fps)
+
+    fps_started = time.monotonic()
+    fps_frames = 0
+    display_fps = 0.0
+
+    last_stale_logged_at = 0.0
+
+    def reset_segment():
+        nonlocal segment_active, sequence, detected, segment_started_at, last_hand_at
+        segment_active = False
+        sequence = []
+        detected = 0
+        segment_started_at = None
+        last_hand_at = None
+
+    def predict_segment():
+        nonlocal label, confidence
+
+        if detected < min_frames:
+            label = "TRY AGAIN"
+            logger.info(
+                "Segment ignored: only %d/%d hand frames",
+                detected,
+                min_frames,
+            )
+            return
+
+        x = prepare(sequence, length, mean, std)
+
+        with torch.inference_mode():
+            logits = model(torch.from_numpy(x).unsqueeze(0))
+            probs = torch.softmax(logits, dim=1)[0]
+
+        confidence = float(probs.max())
+        pred = int(probs.argmax())
+        intent = classes[pred]
+
+        if confidence < threshold:
+            label = "UNKNOWN"
+            logger.info(
+                "Prediction UNKNOWN; best=%s confidence=%.2f",
+                intent,
+                confidence,
+            )
+            return
+
+        label = intent.upper()
+        sentence = sentence_map.get(intent, {}).get(args.language, intent)
+
+        logger.info(
+            "Prediction %s confidence=%.2f sentence=%s",
+            intent,
+            confidence,
+            sentence,
+        )
+
+        state.add(
+            "sign",
+            sentence,
+            {
+                "intent": intent,
+                "confidence": confidence,
+            },
+        )
+        tts.put(sentence)
 
     try:
         while not shutdown_event.is_set():
-            is_new,last_frame_id,frame=camera.read_latest(last_frame_id)
+            is_new, last_frame_id, frame = camera.read_latest(last_frame_id)
 
             if not is_new:
                 if camera.frame_age_seconds > args.camera_stale_timeout:
-                    now=time.monotonic()
+                    now = time.monotonic()
                     if now - last_stale_logged_at >= 2.0:
                         logger.warning(
                             "No fresh camera frame for %.1f seconds",
                             camera.frame_age_seconds,
                         )
-                        last_stale_logged_at=now
+                        last_stale_logged_at = now
                 time.sleep(0.002)
                 continue
 
-            frame_count += 1
-            now=time.monotonic()
-
+            now = time.monotonic()
             should_run_mp = (
                 last_result is None
-                or now-last_mp_at >= mp_interval
+                or now - last_mp_at >= mp_interval
             )
 
             if should_run_mp:
-                rgb=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
-                timestamp_ms=int(now*1000)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                timestamp_ms = int(now * 1000)
 
-                result=detector.detect_for_video(
+                result = detector.detect_for_video(
                     mp.Image(
                         image_format=mp.ImageFormat.SRGB,
                         data=rgb,
@@ -573,162 +633,151 @@ def run_camera(args):
                     timestamp_ms,
                 )
 
-                last_result=result
-                last_features=frame_features(
+                last_result = result
+                last_features = frame_features(
                     result,
                     force_right_hand=not args.no_force_right,
                 )
-                last_mp_at=now
+                last_mp_at = now
             else:
-                result=last_result
+                result = last_result
 
-            if recording:
-                sequence.append(last_features.copy())
+            hand_present = bool(
+                result is not None
+                and result.hand_landmarks
+                and np.any(last_features != 0)
+            )
 
-                if np.any(last_features != 0):
+            if session_active:
+                if hand_present:
+                    last_hand_at = now
+
+                    if not segment_active:
+                        segment_active = True
+                        segment_started_at = now
+                        sequence = []
+                        detected = 0
+                        label = "CAPTURING"
+                        confidence = 0.0
+                        logger.info("Gesture segment started")
+
+                    sequence.append(last_features.copy())
                     detected += 1
 
-                if (
-                    recording_started_at is not None
-                    and now-recording_started_at >= args.max_recording_seconds
-                ):
-                    logger.info("Maximum recording duration reached")
-                    recording=False
+                elif segment_active:
+                    sequence.append(last_features.copy())
 
-            h,w=frame.shape[:2]
+                    gap = (
+                        now - last_hand_at
+                        if last_hand_at is not None
+                        else 0.0
+                    )
+                    duration = (
+                        now - segment_started_at
+                        if segment_started_at is not None
+                        else 0.0
+                    )
+
+                    if (
+                        gap >= args.segment_end_gap
+                        or duration >= args.max_segment_seconds
+                    ):
+                        logger.info(
+                            "Gesture segment ended: %d frames, %.2fs",
+                            len(sequence),
+                            duration,
+                        )
+                        predict_segment()
+                        reset_segment()
+
+            h, w = frame.shape[:2]
 
             if result is not None:
                 for landmarks in result.hand_landmarks or []:
-                    points=[
-                        (int(p.x*w),int(p.y*h))
+                    points = [
+                        (int(p.x * w), int(p.y * h))
                         for p in landmarks
                     ]
 
-                    for start_idx,end_idx in HAND_CONNECTIONS:
-                        if start_idx<len(points) and end_idx<len(points):
+                    for start_idx, end_idx in HAND_CONNECTIONS:
+                        if start_idx < len(points) and end_idx < len(points):
                             cv2.line(
                                 frame,
                                 points[start_idx],
                                 points[end_idx],
-                                (0,255,0),
+                                (0, 255, 0),
                                 1,
                             )
 
                     for point in points:
-                        cv2.circle(frame,point,2,(255,0,255),-1)
+                        cv2.circle(frame, point, 2, (255, 0, 255), -1)
 
             fps_frames += 1
-            elapsed=now-fps_started
+            elapsed = now - fps_started
 
             if elapsed >= 1.0:
-                display_fps=fps_frames/elapsed
-                fps_frames=0
-                fps_started=now
+                display_fps = fps_frames / elapsed
+                fps_frames = 0
+                fps_started = now
+
+            status_text = (
+                "CAPTURING"
+                if segment_active
+                else "SESSION ON"
+                if session_active
+                else "READY"
+            )
 
             cv2.putText(
                 frame,
-                "REC" if recording else "READY",
-                (20,35),
+                status_text,
+                (20, 35),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
-                (0,0,255) if recording else (0,255,0),
+                (0, 0, 255) if segment_active else (0, 255, 0),
                 2,
             )
             cv2.putText(
                 frame,
                 f"FPS {display_fps:.1f} | AI {args.mediapipe_fps:.1f}",
-                (20,65),
+                (20, 65),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
-                (255,255,255),
+                (255, 255, 255),
                 1,
             )
             cv2.putText(
                 frame,
                 f"{label} {confidence:.0%}",
-                (20,h-25),
+                (20, h - 25),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.75,
-                (0,255,255),
+                (0, 255, 255),
                 2,
             )
 
-            cv2.imshow("Communication Assistant",frame)
-            key=cv2.waitKey(1)&0xFF
+            cv2.imshow("Communication Assistant", frame)
+            key = cv2.waitKey(1) & 0xFF
 
-            if key in (ord("q"),27):
+            if key in (ord("q"), 27):
                 shutdown_event.set()
                 break
 
-            if key==32:
-                if not recording:
-                    recording=True
-                    recording_started_at=now
-                    sequence=[]
-                    detected=0
-                    label="RECORDING"
-                    confidence=0.0
-                    logger.info("Recording started")
-                    continue
+            if key == 32:
+                session_active = not session_active
 
-                recording=False
-                recording_started_at=None
-                logger.info(
-                    "Recording stopped: %d frames, %d hand frames",
-                    len(sequence),
-                    detected,
-                )
-
-                if detected<min_frames:
-                    label="TRY AGAIN"
-                    logger.info(
-                        "Not enough hand frames: %d/%d",
-                        detected,
-                        min_frames,
-                    )
-                    continue
-
-                x=prepare(sequence,length,mean,std)
-
-                with torch.inference_mode():
-                    logits=model(
-                        torch.from_numpy(x).unsqueeze(0)
-                    )
-                    probs=torch.softmax(logits,dim=1)[0]
-
-                confidence=float(probs.max())
-                pred=int(probs.argmax())
-                intent=classes[pred]
-
-                if confidence<threshold:
-                    label="UNKNOWN"
-                    logger.info(
-                        "Prediction UNKNOWN; best=%s confidence=%.2f",
-                        intent,
-                        confidence,
-                    )
+                if session_active:
+                    reset_segment()
+                    label = "SESSION ON"
+                    confidence = 0.0
+                    logger.info("Continuous recognition session started")
                 else:
-                    label=intent.upper()
-                    sentence=sentence_map.get(
-                        intent,{}
-                    ).get(args.language,intent)
-
-                    logger.info(
-                        "Prediction %s confidence=%.2f sentence=%s",
-                        intent,
-                        confidence,
-                        sentence,
-                    )
-
-                    state.add(
-                        "sign",
-                        sentence,
-                        {
-                            "intent":intent,
-                            "confidence":confidence,
-                        },
-                    )
-                    tts.put(sentence)
+                    if segment_active and detected >= min_frames:
+                        predict_segment()
+                    reset_segment()
+                    label = "READY"
+                    confidence = 0.0
+                    logger.info("Continuous recognition session stopped")
 
     finally:
         shutdown_event.set()
@@ -737,37 +786,37 @@ def run_camera(args):
         tts.put(None)
         cv2.destroyAllWindows()
 
-
 def install_signal_handlers():
-    def stop_handler(signum,frame):
-        logger.info("Received signal %s; shutting down",signum)
+    def stop_handler(signum, frame):
+        logger.info("Received signal %s; shutting down", signum)
         shutdown_event.set()
 
-    signal.signal(signal.SIGINT,stop_handler)
+    signal.signal(signal.SIGINT, stop_handler)
 
-    if hasattr(signal,"SIGTERM"):
-        signal.signal(signal.SIGTERM,stop_handler)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, stop_handler)
 
 
 def main():
-    parser=argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         description="Low-latency sign-language communication assistant"
     )
-    parser.add_argument("--checkpoint",default="best_bigru_v2.pt")
-    parser.add_argument("--conversation",default="conversation_config.json")
-    parser.add_argument("--hand-model",default="hand_landmarker.task")
-    parser.add_argument("--camera",default="0")
-    parser.add_argument("--language",choices=["vi","en"],default="vi")
-    parser.add_argument("--host",default="0.0.0.0")
-    parser.add_argument("--port",type=int,default=8000)
-    parser.add_argument("--web-only",action="store_true")
-    parser.add_argument("--no-force-right",action="store_true")
+    parser.add_argument("--checkpoint", default="best_bigru_v2.pt")
+    parser.add_argument("--conversation", default="conversation_config.json")
+    parser.add_argument("--hand-model", default="hand_landmarker.task")
+    parser.add_argument("--camera", default="0")
+    parser.add_argument("--language", choices=["vi", "en"], default="vi")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--web-only", action="store_true")
+    parser.add_argument("--no-force-right", action="store_true")
 
-    parser.add_argument("--mediapipe-fps",type=float,default=10.0)
-    parser.add_argument("--torch-threads",type=int,default=2)
-    parser.add_argument("--camera-connect-timeout",type=float,default=8.0)
-    parser.add_argument("--camera-stale-timeout",type=float,default=3.0)
-    parser.add_argument("--max-recording-seconds",type=float,default=8.0)
+    parser.add_argument("--mediapipe-fps", type=float, default=10.0)
+    parser.add_argument("--torch-threads", type=int, default=2)
+    parser.add_argument("--camera-connect-timeout", type=float, default=8.0)
+    parser.add_argument("--camera-stale-timeout", type=float, default=3.0)
+    parser.add_argument("--segment-end-gap", type=float, default=0.45)
+    parser.add_argument("--max-segment-seconds", type=float, default=4.0)
 
     parser.add_argument(
         "--hand-detection-confidence",
@@ -785,12 +834,12 @@ def main():
         default=0.30,
     )
 
-    args=parser.parse_args()
+    args = parser.parse_args()
     install_signal_handlers()
 
-    web_thread=threading.Thread(
+    web_thread = threading.Thread(
         target=run_web,
-        args=(args.host,args.port),
+        args=(args.host, args.port),
         name="web-server",
         daemon=True,
     )
@@ -815,5 +864,5 @@ def main():
         raise
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
