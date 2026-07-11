@@ -329,7 +329,8 @@ def start_tts_worker():
 
 class LatestFrameCamera:
     def __init__(self, source):
-        self.capture = cv2.VideoCapture(source)
+        self.source = source
+        self.capture = cv2.VideoCapture(self.source)
         self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.frame = None
         self.running = True
@@ -340,10 +341,32 @@ class LatestFrameCamera:
 
     def _capture_loop(self):
         while self.running:
+            with self.lock:
+                is_open = self.capture.isOpened() if self.capture else False
+
+            if not is_open:
+                print(f"Attempting to connect to camera: {self.source}")
+                new_capture = cv2.VideoCapture(self.source)
+                new_capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                with self.lock:
+                    if self.capture:
+                        self.capture.release()
+                    self.capture = new_capture
+                if not new_capture.isOpened():
+                    time.sleep(2.0)
+                    continue
+                else:
+                    print("Connected to camera successfully!")
+
             ok, frame = self.capture.read()
             if not ok:
-                time.sleep(0.01)
+                print("Failed to read frame. Reconnecting...")
+                with self.lock:
+                    if self.capture:
+                        self.capture.release()
+                time.sleep(1.0)
                 continue
+
             with self.lock:
                 self.frame = frame
                 self.new_frame_event.set()
@@ -362,13 +385,17 @@ class LatestFrameCamera:
                 return True, self.frame.copy()
 
     def isOpened(self):
-        return self.capture.isOpened()
+        with self.lock:
+            return self.capture.isOpened() if self.capture else False
 
     def release(self):
         self.running = False
         self.new_frame_event.set()
-        self.thread.join(timeout=1)
-        self.capture.release()
+        self.thread.join(timeout=1.0)
+        with self.lock:
+            if self.capture:
+                self.capture.release()
+                self.capture = None
 
 def run_camera(args):
     checkpoint=torch.load(args.checkpoint,map_location="cpu",weights_only=False)
@@ -410,7 +437,7 @@ def run_camera(args):
     source=int(args.camera) if str(args.camera).isdigit() else args.camera
     cap=LatestFrameCamera(source)
     if not cap.isOpened():
-        raise RuntimeError(f"Cannot open camera: {source}")
+        print(f"Warning: Cannot connect to camera: {source}. Will keep retrying...")
 
     tts=start_tts_worker()
     recording=False
