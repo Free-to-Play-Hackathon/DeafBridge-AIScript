@@ -60,6 +60,14 @@ AI_API_KEY=your-groq-api-key
 AI_MODEL=llama-3.3-70b-versatile
 ```
 
+For Cohere-backed JSON behavior, set:
+
+```text
+AI_PROVIDER=cohere
+COHERE_API_KEY=your-cohere-api-key
+AI_MODEL=command-r7b-12-2024
+```
+
 ## Docker
 
 Full stack:

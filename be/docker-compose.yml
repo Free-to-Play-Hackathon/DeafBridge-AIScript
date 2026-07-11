@@ -33,6 +33,7 @@ services:
    AI_PROVIDER: ${AI_PROVIDER:-fake}
    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
    AI_API_KEY: ${AI_API_KEY:-}
+   COHERE_API_KEY: ${COHERE_API_KEY:-}
    AI_MODEL: ${AI_MODEL:-fake-agent}
    DEMO_SEED_ENABLED: ${DEMO_SEED_ENABLED:-true}
   depends_on:
@@ -62,6 +63,7 @@ services:
    AI_PROVIDER: ${AI_PROVIDER:-fake}
    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
    AI_API_KEY: ${AI_API_KEY:-}
+   COHERE_API_KEY: ${COHERE_API_KEY:-}
    AI_MODEL: ${AI_MODEL:-fake-agent}
    DEMO_SEED_ENABLED: ${DEMO_SEED_ENABLED:-true}
   depends_on:
