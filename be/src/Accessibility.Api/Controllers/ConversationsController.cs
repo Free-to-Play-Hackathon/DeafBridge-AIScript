@@ -83,10 +83,24 @@ public class ConversationsController : ControllerBase
         var conversation = await _dbContext.Conversations.FirstOrDefaultAsync(x => x.Id == conversationId && x.UserId == user.Id, cancellationToken);
         if (conversation is null) return NotFound();
 
+        if (!Enum.TryParse<Speaker>(request.Speaker, true, out var speaker))
+        {
+            return BadRequest(new
+            {
+                error = "Invalid speaker",
+                allowedValues = new[] { Speaker.DeafUser.ToString(), Speaker.HearingUser.ToString(), Speaker.System.ToString() }
+            });
+        }
+
+        if (string.IsNullOrWhiteSpace(request.OriginalText))
+        {
+            return BadRequest(new { error = "originalText is required" });
+        }
+
         var segment = new TranscriptSegment
         {
             ConversationId = conversation.Id,
-            Speaker = Enum.Parse<Speaker>(request.Speaker),
+            Speaker = speaker,
             OriginalText = request.OriginalText,
             Language = request.Language,
             StartedAt = request.StartedAt,
