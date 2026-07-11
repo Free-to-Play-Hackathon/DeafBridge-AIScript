@@ -10,6 +10,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+import tempfile
 
 os.environ.setdefault(
     "OPENCV_FFMPEG_CAPTURE_OPTIONS",
@@ -529,6 +530,97 @@ def start_tts_worker(camera_source):
     return items
 
 
+class MicrophoneRecorder:
+    """Record mono audio from the system microphone in a background thread."""
+
+    def __init__(self, sample_rate: int = 16000, device=None):
+        self._sample_rate = sample_rate
+        self._device = device
+        self._frames: list[np.ndarray] = []
+        self._stream = None
+        self._recording = False
+
+    @property
+    def recording(self) -> bool:
+        return self._recording
+
+    def start(self):
+        import sounddevice as sd
+
+        self._frames = []
+        self._recording = True
+        self._stream = sd.InputStream(
+            samplerate=self._sample_rate,
+            channels=1,
+            dtype="float32",
+            device=self._device,
+            callback=self._callback,
+        )
+        self._stream.start()
+
+    def _callback(self, indata, frame_count, time_info, status):
+        if status:
+            logger.warning("Microphone status: %s", status)
+        self._frames.append(indata.copy())
+
+    def stop(self) -> Path | None:
+        import soundfile as sf
+
+        self._recording = False
+
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+
+        if not self._frames:
+            return None
+
+        audio = np.concatenate(self._frames, axis=0)
+        self._frames = []
+
+        if np.max(np.abs(audio)) < 1e-4:
+            logger.warning("Microphone recorded silence")
+            return None
+
+        fd, temp_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        path = Path(temp_path)
+
+        sf.write(str(path), audio, self._sample_rate)
+        logger.info(
+            "Saved recording: %s (%.1f seconds)",
+            path.name,
+            len(audio) / self._sample_rate,
+        )
+        return path
+
+
+def transcribe_audio_file(
+    audio_path: Path,
+    language: str = "en",
+) -> str:
+    """Transcribe a WAV file using the already-loaded faster-whisper model."""
+    global whisper_model, whisper_lock
+
+    with whisper_lock:
+        if whisper_model is None:
+            whisper_model = WhisperModel(
+                os.getenv("WHISPER_MODEL", "small"),
+                device=os.getenv("WHISPER_DEVICE", "cpu"),
+                compute_type=os.getenv("WHISPER_COMPUTE_TYPE", "int8"),
+            )
+
+    segments, info = whisper_model.transcribe(
+        str(audio_path),
+        language=language,
+        vad_filter=True,
+        beam_size=3,
+    )
+    text = " ".join(s.text.strip() for s in segments).strip()
+    return text
+
+
 class LatestFrameCamera:
     """Continuously drains the source and exposes only the newest decoded frame."""
 
@@ -687,6 +779,22 @@ def run_camera(args):
     tts = start_tts_worker(args.camera)
     time.sleep(1)
     tts.put("Text to speech is ready")
+
+    # Microphone recorder for speech input
+    mic_device = None
+    if hasattr(args, "audio_device") and args.audio_device is not None:
+        try:
+            mic_device = int(args.audio_device)
+        except ValueError:
+            mic_device = args.audio_device
+
+    mic = MicrophoneRecorder(
+        sample_rate=getattr(args, "sample_rate", 16000),
+        device=mic_device,
+    )
+    speech_recording = False
+    speech_transcripts: deque[str] = deque(maxlen=3)
+    transcript_display_until = 0.0
 
     session_active = False
     segment_active = False
@@ -891,13 +999,18 @@ def run_camera(args):
                 fps_frames = 0
                 fps_started = now
 
-            status_text = (
-                "CAPTURING"
-                if segment_active
-                else "SESSION ON"
-                if session_active
-                else "READY"
-            )
+            if speech_recording:
+                status_text = "LISTENING"
+                status_color = (0, 165, 255)
+            elif segment_active:
+                status_text = "CAPTURING"
+                status_color = (0, 0, 255)
+            elif session_active:
+                status_text = "SESSION ON"
+                status_color = (0, 255, 0)
+            else:
+                status_text = "READY"
+                status_color = (0, 255, 0)
 
             cv2.putText(
                 frame,
@@ -905,7 +1018,7 @@ def run_camera(args):
                 (20, 35),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
-                (0, 0, 255) if segment_active else (0, 255, 0),
+                status_color,
                 2,
             )
             cv2.putText(
@@ -926,6 +1039,39 @@ def run_camera(args):
                 (0, 255, 255),
                 2,
             )
+
+            # Control hints at bottom-right
+            hints = [
+                "SPACE: Sign session",
+                "S: Speech recording",
+                "Q: Quit",
+            ]
+            for i, hint in enumerate(hints):
+                cv2.putText(
+                    frame,
+                    hint,
+                    (w - 220, h - 10 - (len(hints) - 1 - i) * 22),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (180, 180, 180),
+                    1,
+                )
+
+            # Show speech transcripts overlay
+            if speech_transcripts and now < transcript_display_until:
+                y_offset = 95
+                for line in speech_transcripts:
+                    display_line = line if len(line) <= 60 else line[:57] + "..."
+                    cv2.putText(
+                        frame,
+                        display_line,
+                        (20, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (255, 200, 0),
+                        1,
+                    )
+                    y_offset += 22
 
             cv2.imshow("Communication Assistant", frame)
             key = cv2.waitKey(1) & 0xFF
@@ -950,8 +1096,70 @@ def run_camera(args):
                     confidence = 0.0
                     logger.info("Continuous recognition session stopped")
 
+            if key == ord("s"):
+                speech_recording = not speech_recording
+
+                if speech_recording:
+                    try:
+                        mic.start()
+                        label = "LISTENING"
+                        confidence = 0.0
+                        logger.info("Speech recording started")
+                    except Exception:
+                        logger.exception("Failed to start microphone")
+                        speech_recording = False
+                else:
+                    logger.info("Speech recording stopped")
+                    label = "TRANSCRIBING"
+                    confidence = 0.0
+
+                    try:
+                        audio_path = mic.stop()
+
+                        if audio_path:
+                            logger.info("Transcribing audio")
+                            speech_lang = getattr(
+                                args, "speech_language", "en"
+                            )
+                            text = transcribe_audio_file(
+                                audio_path,
+                                language=speech_lang,
+                            )
+
+                            # Clean up temp file
+                            try:
+                                audio_path.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+
+                            if text:
+                                logger.info("Transcript: %s", text)
+                                state.add(
+                                    "speech",
+                                    text,
+                                    {"language": speech_lang},
+                                )
+                                speech_transcripts.append(text)
+                                transcript_display_until = (
+                                    time.monotonic() + 8.0
+                                )
+                                label = "SPEECH OK"
+                                tts.put(text)
+                            else:
+                                label = "NO SPEECH"
+                        else:
+                            label = "NO SPEECH"
+
+                    except Exception:
+                        logger.exception(
+                            "Speech transcription failed"
+                        )
+                        label = "MIC ERROR"
+
     finally:
         shutdown_event.set()
+        if mic.recording:
+            mic.stop()
         camera.release()
         detector.close()
         tts.put(None)
@@ -988,6 +1196,13 @@ def main():
     parser.add_argument("--camera-stale-timeout", type=float, default=3.0)
     parser.add_argument("--segment-end-gap", type=float, default=0.45)
     parser.add_argument("--max-segment-seconds", type=float, default=4.0)
+
+    parser.add_argument("--audio-device", default=None,
+                        help="Microphone device index or name")
+    parser.add_argument("--sample-rate", type=int, default=16000,
+                        help="Microphone sample rate in Hz")
+    parser.add_argument("--speech-language", default="en",
+                        help="Language for speech transcription")
 
     parser.add_argument(
         "--hand-detection-confidence",
