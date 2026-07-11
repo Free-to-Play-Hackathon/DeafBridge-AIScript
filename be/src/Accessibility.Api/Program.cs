@@ -1,5 +1,6 @@
 using Accessibility.Api.Extensions;
 using Accessibility.Application.Common.Interfaces;
+using Accessibility.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
 
@@ -17,8 +18,13 @@ var app = builder.Build();
 
 using (var scope = app.Services.CreateScope())
 {
-    var dbContext = (DbContext)scope.ServiceProvider.GetRequiredService<IApplicationDbContext>();
+    var dbContext = (AccessibilityDbContext)scope.ServiceProvider.GetRequiredService<IApplicationDbContext>();
     await dbContext.Database.MigrateAsync();
+
+    if (app.Configuration.GetValue("DEMO_SEED_ENABLED", true))
+    {
+        await DemoDataSeeder.SeedAsync(dbContext);
+    }
 }
 
 if (app.Environment.IsDevelopment() || app.Configuration.GetValue<bool>("Swagger:Enabled"))

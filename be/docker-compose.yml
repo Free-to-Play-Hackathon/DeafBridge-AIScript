@@ -49,6 +49,7 @@ services:
    AI_PROVIDER: ${AI_PROVIDER:-fake}
    AI_API_KEY: ${AI_API_KEY:-}
    AI_MODEL: ${AI_MODEL:-fake-agent}
+   DEMO_SEED_ENABLED: ${DEMO_SEED_ENABLED:-true}
   depends_on:
    postgres:
     condition: service_healthy
@@ -78,6 +79,7 @@ services:
    AI_PROVIDER: ${AI_PROVIDER:-fake}
    AI_API_KEY: ${AI_API_KEY:-}
    AI_MODEL: ${AI_MODEL:-fake-agent}
+   DEMO_SEED_ENABLED: ${DEMO_SEED_ENABLED:-true}
   depends_on:
    postgres:
     condition: service_healthy

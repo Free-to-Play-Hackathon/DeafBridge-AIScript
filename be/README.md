@@ -88,6 +88,27 @@ docker compose up -d --build
 
 `docker compose down -v` removes the local PostgreSQL volume. Use it for clean demo validation, not when preserving local data matters.
 
+## Demo Seed
+
+On API startup, demo seed is enabled by default:
+
+```text
+DEMO_SEED_ENABLED=true
+```
+
+It creates:
+
+- User: `local@example.com`
+- Conversation: `22222222-2222-2222-2222-222222222222`
+- One transcript that asks the AI agent to plan a note, appointment, and reminder
+- One outbox event so the worker/Groq agent processes it automatically
+
+Use this Swagger endpoint to inspect the seeded conversation:
+
+```text
+GET /api/conversations/22222222-2222-2222-2222-222222222222/proposed-actions
+```
+
 ## Example Flow
 
 1. Create conversation.
