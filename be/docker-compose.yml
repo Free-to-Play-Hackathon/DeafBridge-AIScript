@@ -1,20 +1,4 @@
 services:
- postgres:
-  image: postgres:16
-  environment:
-   POSTGRES_DB: accessibility
-   POSTGRES_USER: postgres
-   POSTGRES_PASSWORD: postgres
-  ports:
-   - "5432:5432"
-  volumes:
-   - postgres-data:/var/lib/postgresql/data
-  healthcheck:
-   test: ["CMD-SHELL", "pg_isready -U postgres -d accessibility"]
-   interval: 5s
-   timeout: 5s
-   retries: 20
-
  rabbitmq:
   image: rabbitmq:3-management
   ports:
@@ -35,7 +19,7 @@ services:
   environment:
    ASPNETCORE_ENVIRONMENT: Development
    ASPNETCORE_URLS: http://+:8080
-   ConnectionStrings__DefaultConnection: ${ConnectionStrings__DefaultConnection:-Host=postgres;Port=5432;Database=accessibility;Username=postgres;Password=postgres}
+   ConnectionStrings__DefaultConnection: ${ConnectionStrings__DefaultConnection:?Set this to your Supabase PostgreSQL connection string}
    RABBITMQ_HOST: rabbitmq
    RABBITMQ_USERNAME: guest
    RABBITMQ_PASSWORD: guest
@@ -47,12 +31,11 @@ services:
    SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:-noreply@example.com}
    SENDGRID_FROM_NAME: ${SENDGRID_FROM_NAME:-Accessibility Assistant}
    AI_PROVIDER: ${AI_PROVIDER:-fake}
+   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
    AI_API_KEY: ${AI_API_KEY:-}
    AI_MODEL: ${AI_MODEL:-fake-agent}
    DEMO_SEED_ENABLED: ${DEMO_SEED_ENABLED:-true}
   depends_on:
-   postgres:
-    condition: service_healthy
    rabbitmq:
     condition: service_healthy
   ports:
@@ -65,7 +48,7 @@ services:
   env_file:
    - .env
   environment:
-   ConnectionStrings__DefaultConnection: ${ConnectionStrings__DefaultConnection:-Host=postgres;Port=5432;Database=accessibility;Username=postgres;Password=postgres}
+   ConnectionStrings__DefaultConnection: ${ConnectionStrings__DefaultConnection:?Set this to your Supabase PostgreSQL connection string}
    RABBITMQ_HOST: rabbitmq
    RABBITMQ_USERNAME: guest
    RABBITMQ_PASSWORD: guest
@@ -77,12 +60,11 @@ services:
    SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:-noreply@example.com}
    SENDGRID_FROM_NAME: ${SENDGRID_FROM_NAME:-Accessibility Assistant}
    AI_PROVIDER: ${AI_PROVIDER:-fake}
+   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
    AI_API_KEY: ${AI_API_KEY:-}
    AI_MODEL: ${AI_MODEL:-fake-agent}
    DEMO_SEED_ENABLED: ${DEMO_SEED_ENABLED:-true}
   depends_on:
-   postgres:
-    condition: service_healthy
    rabbitmq:
     condition: service_healthy
 
@@ -93,7 +75,7 @@ services:
    context: .
    dockerfile: Dockerfile.test
   environment:
-   ConnectionStrings__DefaultConnection: ${ConnectionStrings__DefaultConnection:-Host=postgres;Port=5432;Database=accessibility_tests;Username=postgres;Password=postgres}
+   ConnectionStrings__DefaultConnection: Host=localhost;Port=5432;Database=accessibility_tests;Username=postgres;Password=postgres
    RABBITMQ_HOST: rabbitmq
    RABBITMQ_USERNAME: guest
    RABBITMQ_PASSWORD: guest
@@ -106,11 +88,3 @@ services:
    SENDGRID_FROM_NAME: Accessibility Assistant
    AI_PROVIDER: fake
    AI_MODEL: fake-agent
-  depends_on:
-   postgres:
-    condition: service_healthy
-   rabbitmq:
-    condition: service_healthy
-
-volumes:
- postgres-data:

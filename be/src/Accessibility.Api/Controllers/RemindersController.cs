@@ -21,7 +21,29 @@ public class RemindersController : ControllerBase
     public async Task<IActionResult> GetReminders(CancellationToken cancellationToken)
     {
         var user = await GetCurrentUserAsync(cancellationToken);
-        return Ok(await _dbContext.Reminders.Where(x => x.UserId == user.Id).OrderBy(x => x.ScheduledAt).ToListAsync(cancellationToken));
+        var reminders = await _dbContext.Reminders
+            .Where(x => x.UserId == user.Id)
+            .OrderBy(x => x.ScheduledAt)
+            .Select(x => new
+            {
+                x.Id,
+                x.UserId,
+                x.RelatedEntityType,
+                x.RelatedEntityId,
+                Channel = x.Channel.ToString(),
+                x.ScheduledAt,
+                Status = x.Status.ToString(),
+                x.RetryCount,
+                x.LastAttemptAt,
+                x.SentAt,
+                x.Title,
+                x.Description,
+                x.RecipientEmail,
+                x.CreatedAt
+            })
+            .ToListAsync(cancellationToken);
+
+        return Ok(reminders);
     }
 
     [HttpGet("{id:guid}")]
@@ -29,7 +51,25 @@ public class RemindersController : ControllerBase
     {
         var user = await GetCurrentUserAsync(cancellationToken);
         var reminder = await _dbContext.Reminders.FirstOrDefaultAsync(x => x.Id == id && x.UserId == user.Id, cancellationToken);
-        return reminder is null ? NotFound() : Ok(reminder);
+        return reminder is null
+            ? NotFound()
+            : Ok(new
+            {
+                reminder.Id,
+                reminder.UserId,
+                reminder.RelatedEntityType,
+                reminder.RelatedEntityId,
+                Channel = reminder.Channel.ToString(),
+                reminder.ScheduledAt,
+                Status = reminder.Status.ToString(),
+                reminder.RetryCount,
+                reminder.LastAttemptAt,
+                reminder.SentAt,
+                reminder.Title,
+                reminder.Description,
+                reminder.RecipientEmail,
+                reminder.CreatedAt
+            });
     }
 
     [HttpPost("{id:guid}/cancel")]

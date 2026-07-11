@@ -9,9 +9,14 @@ using FluentAssertions;
 using MassTransit;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.EntityFrameworkCore;
 using Moq;
+using Moq.Protected;
+using System.Net;
 using System.Security.Claims;
+using System.Text;
 using Xunit;
 
 namespace Accessibility.UnitTests.Unit;
@@ -46,6 +51,56 @@ public class AgentAndActionTests
         }, CancellationToken.None);
 
         result.Actions.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task OpenAIAgent_ExecutesResponsesFunctionCallAsReminderAction()
+    {
+        var firstResponse = """
+        {
+          "output": [
+            {
+              "type": "function_call",
+              "call_id": "call_1",
+              "name": "schedule_reminder",
+              "arguments": "{\"title\":\"Hospital appointment reminder\",\"description\":\"Leave early for Cho Ray Hospital.\",\"scheduledAt\":\"2026-07-12T07:30:00+07:00\",\"dueAt\":null,\"location\":\"Cho Ray Hospital\",\"recipientEmail\":null}"
+            }
+          ]
+        }
+        """;
+        var finalResponse = """
+        {
+          "output_text": "{\"detectedLanguage\":\"vi\",\"translatedText\":\"Reminder before hospital appointment.\",\"summary\":\"The user needs a reminder before a hospital appointment.\",\"category\":\"Reminder\",\"importance\":\"High\",\"suggestedReplies\":[\"I will remind you.\"]}",
+          "output": []
+        }
+        """;
+        var httpClientFactory = CreateHttpClientFactory(firstResponse, finalResponse);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["AI_PROVIDER"] = "openai",
+                ["OPENAI_API_KEY"] = "test-key",
+                ["AI_MODEL"] = "gpt-test"
+            })
+            .Build();
+        var agent = new OpenAIConversationAgent(httpClientFactory.Object, configuration, NullLogger<OpenAIConversationAgent>.Instance);
+
+        var result = await agent.AnalyzeAsync(new AgentContext
+        {
+            TranscriptText = "Ngay mai luc 8 gio toi co lich kham o benh vien Cho Ray, hay nhac toi truoc 30 phut.",
+            Speaker = Speaker.HearingUser.ToString(),
+            Timestamp = DateTimeOffset.Parse("2026-07-11T10:00:00+07:00"),
+            UserTimeZone = "Asia/Ho_Chi_Minh"
+        }, CancellationToken.None);
+
+        result.ModelName.Should().Be("gpt-test");
+        result.Category.Should().Be(AnalysisCategory.Reminder);
+        result.Importance.Should().Be(Importance.High);
+        result.Actions.Should().ContainSingle(action =>
+            action.Type == ActionType.ScheduleReminder &&
+            action.Title == "Hospital appointment reminder" &&
+            action.ScheduledAt == DateTimeOffset.Parse("2026-07-12T07:30:00+07:00") &&
+            action.RequiresConfirmation);
     }
 
     [Fact]
@@ -119,5 +174,27 @@ public class AgentAndActionTests
                     "TestAuth"))
             }
         };
+    }
+
+    private static Mock<IHttpClientFactory> CreateHttpClientFactory(params string[] responses)
+    {
+        var responseQueue = new Queue<string>(responses);
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected()
+            .Setup<Task<HttpResponseMessage>>(
+                "SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync(() => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(responseQueue.Dequeue(), Encoding.UTF8, "application/json")
+            });
+
+        var httpClientFactory = new Mock<IHttpClientFactory>();
+        httpClientFactory
+            .Setup(x => x.CreateClient(nameof(OpenAIConversationAgent)))
+            .Returns(new HttpClient(handler.Object));
+
+        return httpClientFactory;
     }
 }

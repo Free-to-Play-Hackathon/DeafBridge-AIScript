@@ -25,9 +25,17 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IConversationAgent>(sp =>
         {
             var provider = configuration["AI_PROVIDER"];
-            return string.Equals(provider, "groq", StringComparison.OrdinalIgnoreCase)
-                ? ActivatorUtilities.CreateInstance<GroqConversationAgent>(sp)
-                : new FakeConversationAgent();
+            if (string.Equals(provider, "openai", StringComparison.OrdinalIgnoreCase))
+            {
+                return ActivatorUtilities.CreateInstance<OpenAIConversationAgent>(sp);
+            }
+
+            if (string.Equals(provider, "groq", StringComparison.OrdinalIgnoreCase))
+            {
+                return ActivatorUtilities.CreateInstance<GroqConversationAgent>(sp);
+            }
+
+            return new FakeConversationAgent();
         });
         services.AddSingleton<IEmailSender, SendGridEmailSender>();
         services.AddMassTransit(x =>

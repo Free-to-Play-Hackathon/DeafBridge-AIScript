@@ -33,8 +33,26 @@ SENDGRID_FROM_EMAIL=noreply@example.com
 SENDGRID_FROM_NAME=Accessibility Assistant
 ```
 
-With no AI key, backend uses deterministic fake agent.
-For Groq-backed agent behavior, set:
+For real agentic tool calling, set OpenAI as the AI provider:
+
+```text
+AI_PROVIDER=openai
+OPENAI_API_KEY=your-openai-api-key
+AI_MODEL=gpt-5.6
+```
+
+The OpenAI agent uses the Responses API with function tools:
+
+- `save_note`
+- `create_task`
+- `create_appointment`
+- `schedule_reminder`
+- `send_email`
+
+The model decides which tool to call. The backend executes those tool calls by creating `ProposedAction` records. Appointment, reminder, task, and email actions still require user confirmation before the worker creates the real appointment/reminder/email work.
+
+With `AI_PROVIDER=fake`, backend uses deterministic fake agent for offline tests.
+For Groq-backed JSON behavior, set:
 
 ```text
 AI_PROVIDER=groq
@@ -114,7 +132,7 @@ GET /api/conversations/22222222-2222-2222-2222-222222222222/proposed-actions
 1. Create conversation.
 2. Submit finalized transcript.
 3. Outbox publishes `TranscriptReceived`.
-4. Worker creates analysis and fake agent proposals.
+4. Worker asks the AI agent to call backend tools.
 5. Read proposed actions.
 6. Confirm appointment/reminder actions.
 7. Outbox publishes confirmation.

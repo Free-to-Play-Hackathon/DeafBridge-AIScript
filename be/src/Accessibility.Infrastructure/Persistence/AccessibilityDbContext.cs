@@ -21,6 +21,18 @@ public class AccessibilityDbContext : DbContext, IApplicationDbContext
     public DbSet<Reminder> Reminders => Set<Reminder>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
 
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        NormalizeDateTimeOffsets();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        NormalizeDateTimeOffsets();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<User>(entity =>
@@ -103,5 +115,20 @@ public class AccessibilityDbContext : DbContext, IApplicationDbContext
         });
 
         base.OnModelCreating(modelBuilder);
+    }
+
+    private void NormalizeDateTimeOffsets()
+    {
+        foreach (var entry in ChangeTracker.Entries()
+            .Where(entry => entry.State is EntityState.Added or EntityState.Modified))
+        {
+            foreach (var property in entry.Properties)
+            {
+                if (property.CurrentValue is DateTimeOffset dateTimeOffset)
+                {
+                    property.CurrentValue = dateTimeOffset.ToUniversalTime();
+                }
+            }
+        }
     }
 }

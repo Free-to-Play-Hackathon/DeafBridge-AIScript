@@ -16,9 +16,17 @@ builder.Services.AddScoped(sp => (AccessibilityDbContext)sp.GetRequiredService<I
 builder.Services.AddSingleton<IConversationAgent>(sp =>
 {
     var provider = builder.Configuration["AI_PROVIDER"];
-    return string.Equals(provider, "groq", StringComparison.OrdinalIgnoreCase)
-        ? ActivatorUtilities.CreateInstance<GroqConversationAgent>(sp)
-        : new FakeConversationAgent();
+    if (string.Equals(provider, "openai", StringComparison.OrdinalIgnoreCase))
+    {
+        return ActivatorUtilities.CreateInstance<OpenAIConversationAgent>(sp);
+    }
+
+    if (string.Equals(provider, "groq", StringComparison.OrdinalIgnoreCase))
+    {
+        return ActivatorUtilities.CreateInstance<GroqConversationAgent>(sp);
+    }
+
+    return new FakeConversationAgent();
 });
 builder.Services.AddSingleton<IEmailSender, SendGridEmailSender>();
 builder.Services.AddHttpClient();
@@ -43,11 +51,7 @@ builder.Services.AddMassTransit(x =>
             h.Password(builder.Configuration["RABBITMQ_PASSWORD"] ?? "guest");
         });
 
-        cfg.UseMessageRetry(r => r.Immediate(3));
-        cfg.UseDelayedRedelivery(r => r.Intervals(
-            TimeSpan.FromMinutes(1),
-            TimeSpan.FromMinutes(5),
-            TimeSpan.FromMinutes(15)));
+        cfg.UseMessageRetry(r => r.Interval(3, TimeSpan.FromSeconds(5)));
         cfg.ConfigureEndpoints(context);
     });
 });
