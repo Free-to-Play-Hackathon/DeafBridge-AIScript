@@ -535,16 +535,21 @@ def run_camera(args):
     display_fps=0.0
     recording_started_at=None
 
+    last_stale_logged_at=0.0
+
     try:
         while not shutdown_event.is_set():
             is_new,last_frame_id,frame=camera.read_latest(last_frame_id)
 
             if not is_new:
                 if camera.frame_age_seconds > args.camera_stale_timeout:
-                    logger.warning(
-                        "No fresh camera frame for %.1f seconds",
-                        camera.frame_age_seconds,
-                    )
+                    now=time.monotonic()
+                    if now - last_stale_logged_at >= 2.0:
+                        logger.warning(
+                            "No fresh camera frame for %.1f seconds",
+                            camera.frame_age_seconds,
+                        )
+                        last_stale_logged_at=now
                 time.sleep(0.002)
                 continue
 
