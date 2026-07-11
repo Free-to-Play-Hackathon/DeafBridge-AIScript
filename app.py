@@ -340,24 +340,69 @@ def prepare(sequence,length,mean,std):
     return ((sequence-mean)/std).astype(np.float32)
 
 def start_tts_worker():
-    items=queue.Queue()
+    items = queue.Queue()
 
     def worker():
+        logger.info("TTS worker starting")
+
         try:
             import pyttsx3
-            engine=pyttsx3.init()
-            engine.setProperty("rate",155)
+
+            engine = pyttsx3.init(driverName="sapi5")
+            engine.setProperty("rate", 155)
+            engine.setProperty("volume", 1.0)
+
+            voices = engine.getProperty("voices")
+
+            logger.info(
+                "TTS initialized with %d voices",
+                len(voices),
+            )
+
+            for index, voice in enumerate(voices):
+                logger.info(
+                    "TTS voice %d: %s | %s",
+                    index,
+                    getattr(voice, "name", "unknown"),
+                    getattr(voice, "id", "unknown"),
+                )
+
         except Exception:
+            logger.exception("TTS initialization failed")
             return
 
         while True:
-            text=items.get()
-            if text is None:
-                break
-            engine.say(text)
-            engine.runAndWait()
+            text = items.get()
 
-    threading.Thread(target=worker,daemon=True).start()
+            try:
+                if text is None:
+                    logger.info("TTS worker stopping")
+                    return
+
+                logger.info("TTS speaking: %s", text)
+
+                engine.stop()
+                engine.say(str(text))
+                engine.runAndWait()
+
+                logger.info("TTS finished: %s", text)
+
+            except Exception:
+                logger.exception(
+                    "TTS failed while speaking: %s",
+                    text,
+                )
+
+            finally:
+                items.task_done()
+
+    thread = threading.Thread(
+        target=worker,
+        name="tts-worker",
+        daemon=True,
+    )
+    thread.start()
+
     return items
 
 
@@ -517,6 +562,8 @@ def run_camera(args):
     camera.wait_until_connected(args.camera_connect_timeout)
 
     tts = start_tts_worker()
+    time.sleep(1)
+    tts.put("Text to speech is ready")
 
     session_active = False
     segment_active = False
