@@ -1043,7 +1043,7 @@ def run_camera(args):
             # Control hints at bottom-right
             hints = [
                 "SPACE: Sign session",
-                "S: Speech recording",
+                "Hold S: Speech record",
                 "Q: Quit",
             ]
             for i, hint in enumerate(hints):
@@ -1096,65 +1096,65 @@ def run_camera(args):
                     confidence = 0.0
                     logger.info("Continuous recognition session stopped")
 
-            if key == ord("s"):
-                speech_recording = not speech_recording
-
-                if speech_recording:
-                    try:
-                        mic.start()
-                        label = "LISTENING"
-                        confidence = 0.0
-                        logger.info("Speech recording started")
-                    except Exception:
-                        logger.exception("Failed to start microphone")
-                        speech_recording = False
-                else:
-                    logger.info("Speech recording stopped")
-                    label = "TRANSCRIBING"
+            # Hold S to record speech; release to stop and transcribe
+            if key == ord("s") and not speech_recording:
+                try:
+                    mic.start()
+                    speech_recording = True
+                    label = "LISTENING"
                     confidence = 0.0
+                    logger.info("Speech recording started (hold S)")
+                except Exception:
+                    logger.exception("Failed to start microphone")
 
-                    try:
-                        audio_path = mic.stop()
+            elif key != ord("s") and speech_recording:
+                speech_recording = False
+                logger.info("Speech recording stopped (S released)")
+                label = "TRANSCRIBING"
+                confidence = 0.0
 
-                        if audio_path:
-                            logger.info("Transcribing audio")
-                            speech_lang = getattr(
-                                args, "speech_language", "en"
+                try:
+                    audio_path = mic.stop()
+
+                    if audio_path:
+                        logger.info("Transcribing audio")
+                        speech_lang = getattr(
+                            args, "speech_language", "en"
+                        )
+                        text = transcribe_audio_file(
+                            audio_path,
+                            language=speech_lang,
+                        )
+
+                        # Clean up temp file
+                        try:
+                            audio_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+
+                        if text:
+                            logger.info("Transcript: %s", text)
+                            state.add(
+                                "speech",
+                                text,
+                                {"language": speech_lang},
                             )
-                            text = transcribe_audio_file(
-                                audio_path,
-                                language=speech_lang,
+                            speech_transcripts.append(text)
+                            transcript_display_until = (
+                                time.monotonic() + 8.0
                             )
-
-                            # Clean up temp file
-                            try:
-                                audio_path.unlink(missing_ok=True)
-                            except Exception:
-                                pass
-
-                            if text:
-                                logger.info("Transcript: %s", text)
-                                state.add(
-                                    "speech",
-                                    text,
-                                    {"language": speech_lang},
-                                )
-                                speech_transcripts.append(text)
-                                transcript_display_until = (
-                                    time.monotonic() + 8.0
-                                )
-                                label = "SPEECH OK"
-                                tts.put(text)
-                            else:
-                                label = "NO SPEECH"
+                            label = "SPEECH OK"
+                            tts.put(text)
                         else:
                             label = "NO SPEECH"
+                    else:
+                        label = "NO SPEECH"
 
-                    except Exception:
-                        logger.exception(
-                            "Speech transcription failed"
-                        )
-                        label = "MIC ERROR"
+                except Exception:
+                    logger.exception(
+                        "Speech transcription failed"
+                    )
+                    label = "MIC ERROR"
 
     finally:
         shutdown_event.set()
