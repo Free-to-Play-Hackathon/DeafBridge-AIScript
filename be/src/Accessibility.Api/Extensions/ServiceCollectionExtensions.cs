@@ -57,6 +57,16 @@ public static class ServiceCollectionExtensions
             });
 
         services.AddAuthorization();
+        services.AddCors(options =>
+        {
+            options.AddPolicy("DemoCors", policy =>
+            {
+                policy
+                    .AllowAnyOrigin()
+                    .AllowAnyHeader()
+                    .AllowAnyMethod();
+            });
+        });
         services.AddControllers();
         services.AddEndpointsApiExplorer();
         services.AddSwaggerGen();
@@ -83,6 +93,7 @@ public static class ServiceCollectionExtensions
         app.UseExceptionHandler();
         app.UseIpRateLimiting();
         app.UseRouting();
+        app.UseCors("DemoCors");
         app.UseAuthentication();
         app.UseAuthorization();
         app.MapControllers();
