@@ -34,6 +34,13 @@ SENDGRID_FROM_NAME=Accessibility Assistant
 ```
 
 With no AI key, backend uses deterministic fake agent.
+For Groq-backed agent behavior, set:
+
+```text
+AI_PROVIDER=groq
+AI_API_KEY=your-groq-api-key
+AI_MODEL=llama-3.3-70b-versatile
+```
 
 ## Docker
 

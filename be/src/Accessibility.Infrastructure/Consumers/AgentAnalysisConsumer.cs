@@ -42,6 +42,18 @@ public class AgentAnalysisConsumer : IConsumer<TranscriptAnalyzed>
 
         var conversation = await _dbContext.Conversations.FirstOrDefaultAsync(x => x.Id == analysis.ConversationId, context.CancellationToken);
         var user = await _dbContext.Users.FirstOrDefaultAsync(x => x.Id == conversation!.UserId, context.CancellationToken);
+        var recentContext = await _dbContext.TranscriptSegments
+            .Where(x => x.ConversationId == analysis.ConversationId && x.Id != transcript.Id)
+            .OrderByDescending(x => x.SequenceNumber)
+            .Take(20)
+            .OrderBy(x => x.SequenceNumber)
+            .Select(x => new PreviousContext
+            {
+                Speaker = x.Speaker.ToString(),
+                Text = x.OriginalText,
+                Timestamp = x.StartedAt
+            })
+            .ToListAsync(context.CancellationToken);
 
         var agentResult = await _agent.AnalyzeAsync(new AgentContext
         {
@@ -51,7 +63,8 @@ public class AgentAnalysisConsumer : IConsumer<TranscriptAnalyzed>
             Speaker = transcript.Speaker.ToString(),
             Timestamp = transcript.StartedAt,
             UserTimeZone = user?.TimeZone ?? "Asia/Ho_Chi_Minh",
-            UserPreferredLanguage = user?.PreferredLanguage ?? "vi"
+            UserPreferredLanguage = user?.PreferredLanguage ?? "vi",
+            RecentContext = recentContext
         }, context.CancellationToken);
 
         analysis.Summary = agentResult.Summary;
@@ -106,6 +119,10 @@ public class AgentAnalysisConsumer : IConsumer<TranscriptAnalyzed>
         foreach (var action in createdActions)
         {
             await _publishEndpoint.Publish(new ProposedActionCreated(action.Id));
+            if (!action.RequiresConfirmation)
+            {
+                await _publishEndpoint.Publish(new ProposedActionConfirmed(action.Id));
+            }
         }
 
         _logger.LogInformation("Agent analysis completed for conversation {ConversationId}", analysis.ConversationId);

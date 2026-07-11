@@ -13,7 +13,13 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Services.AddDbContext<IApplicationDbContext, AccessibilityDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection") ?? "Host=localhost;Port=5432;Database=accessibility;Username=postgres;Password=postgres"));
 builder.Services.AddScoped(sp => (AccessibilityDbContext)sp.GetRequiredService<IApplicationDbContext>());
-builder.Services.AddSingleton<IConversationAgent, FakeConversationAgent>();
+builder.Services.AddSingleton<IConversationAgent>(sp =>
+{
+    var provider = builder.Configuration["AI_PROVIDER"];
+    return string.Equals(provider, "groq", StringComparison.OrdinalIgnoreCase)
+        ? ActivatorUtilities.CreateInstance<GroqConversationAgent>(sp)
+        : new FakeConversationAgent();
+});
 builder.Services.AddSingleton<IEmailSender, SendGridEmailSender>();
 builder.Services.AddHttpClient();
 

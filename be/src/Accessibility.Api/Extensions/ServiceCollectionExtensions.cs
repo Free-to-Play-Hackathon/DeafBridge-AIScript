@@ -22,7 +22,13 @@ public static class ServiceCollectionExtensions
         services.AddDbContext<IApplicationDbContext, AccessibilityDbContext>(options =>
             options.UseNpgsql(configuration.GetConnectionString("DefaultConnection") ?? "Host=localhost;Port=5432;Database=accessibility;Username=postgres;Password=postgres"));
 
-        services.AddSingleton<IConversationAgent, FakeConversationAgent>();
+        services.AddSingleton<IConversationAgent>(sp =>
+        {
+            var provider = configuration["AI_PROVIDER"];
+            return string.Equals(provider, "groq", StringComparison.OrdinalIgnoreCase)
+                ? ActivatorUtilities.CreateInstance<GroqConversationAgent>(sp)
+                : new FakeConversationAgent();
+        });
         services.AddSingleton<IEmailSender, SendGridEmailSender>();
         services.AddMassTransit(x =>
         {
