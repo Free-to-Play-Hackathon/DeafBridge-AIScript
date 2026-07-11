@@ -1,0 +1,114 @@
+services:
+ postgres:
+  image: postgres:16
+  environment:
+   POSTGRES_DB: accessibility
+   POSTGRES_USER: postgres
+   POSTGRES_PASSWORD: postgres
+  ports:
+   - "5432:5432"
+  volumes:
+   - postgres-data:/var/lib/postgresql/data
+  healthcheck:
+   test: ["CMD-SHELL", "pg_isready -U postgres -d accessibility"]
+   interval: 5s
+   timeout: 5s
+   retries: 20
+
+ rabbitmq:
+  image: rabbitmq:3-management
+  ports:
+   - "5672:5672"
+   - "15672:15672"
+  healthcheck:
+   test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+   interval: 5s
+   timeout: 5s
+   retries: 20
+
+ api:
+  build:
+   context: .
+   dockerfile: src/Accessibility.Api/Dockerfile
+  env_file:
+   - .env
+  environment:
+   ASPNETCORE_ENVIRONMENT: Development
+   ASPNETCORE_URLS: http://+:8080
+   ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=accessibility;Username=postgres;Password=postgres
+   RABBITMQ_HOST: rabbitmq
+   RABBITMQ_USERNAME: guest
+   RABBITMQ_PASSWORD: guest
+   JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+   JWT_ISSUER: ${JWT_ISSUER:-UavPms.Api}
+   JWT_AUDIENCE: ${JWT_AUDIENCE:-UavPms.Client}
+   JWT_EXPIRY_MINUTES: ${JWT_EXPIRY_MINUTES:-60}
+   SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+   SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:-noreply@example.com}
+   SENDGRID_FROM_NAME: ${SENDGRID_FROM_NAME:-Accessibility Assistant}
+   AI_PROVIDER: ${AI_PROVIDER:-fake}
+   AI_API_KEY: ${AI_API_KEY:-}
+   AI_MODEL: ${AI_MODEL:-fake-agent}
+  depends_on:
+   postgres:
+    condition: service_healthy
+   rabbitmq:
+    condition: service_healthy
+  ports:
+   - "8080:8080"
+
+ worker:
+  build:
+   context: .
+   dockerfile: src/Accessibility.Worker/Dockerfile
+  env_file:
+   - .env
+  environment:
+   ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=accessibility;Username=postgres;Password=postgres
+   RABBITMQ_HOST: rabbitmq
+   RABBITMQ_USERNAME: guest
+   RABBITMQ_PASSWORD: guest
+   JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+   JWT_ISSUER: ${JWT_ISSUER:-UavPms.Api}
+   JWT_AUDIENCE: ${JWT_AUDIENCE:-UavPms.Client}
+   JWT_EXPIRY_MINUTES: ${JWT_EXPIRY_MINUTES:-60}
+   SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+   SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:-noreply@example.com}
+   SENDGRID_FROM_NAME: ${SENDGRID_FROM_NAME:-Accessibility Assistant}
+   AI_PROVIDER: ${AI_PROVIDER:-fake}
+   AI_API_KEY: ${AI_API_KEY:-}
+   AI_MODEL: ${AI_MODEL:-fake-agent}
+  depends_on:
+   postgres:
+    condition: service_healthy
+   rabbitmq:
+    condition: service_healthy
+
+ tests:
+  profiles:
+   - test
+  build:
+   context: .
+   dockerfile: Dockerfile.test
+  environment:
+   ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=accessibility_tests;Username=postgres;Password=postgres
+   RABBITMQ_HOST: rabbitmq
+   RABBITMQ_USERNAME: guest
+   RABBITMQ_PASSWORD: guest
+   JWT_SECRET: test-secret-must-be-at-least-32-characters
+   JWT_ISSUER: UavPms.Api
+   JWT_AUDIENCE: UavPms.Client
+   JWT_EXPIRY_MINUTES: "60"
+   SENDGRID_API_KEY: ""
+   SENDGRID_FROM_EMAIL: noreply@example.com
+   SENDGRID_FROM_NAME: Accessibility Assistant
+   AI_PROVIDER: fake
+   AI_MODEL: fake-agent
+  depends_on:
+   postgres:
+    condition: service_healthy
+   rabbitmq:
+    condition: service_healthy
+
+volumes:
+ postgres-data:

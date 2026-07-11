@@ -1,0 +1,45 @@
+@host = http://localhost:8080
+@conversationId = paste-conversation-id-here
+@proposedActionId = paste-proposed-action-id-here
+
+### Health
+GET {{host}}/health
+
+### Create conversation
+POST {{host}}/api/conversations
+Content-Type: application/json
+
+{
+  "title": "Hospital visit"
+}
+
+### Submit transcript
+POST {{host}}/api/conversations/{{conversationId}}/transcripts
+Content-Type: application/json
+Idempotency-Key: sample-transcript-001
+
+{
+  "speaker": "HearingUser",
+  "originalText": "Ngay mai luc 8 gio toi co lich kham o benh vien Cho Ray, hay nhac toi truoc 30 phut.",
+  "language": "vi",
+  "startedAt": "2026-07-11T10:00:00+07:00",
+  "endedAt": "2026-07-11T10:00:05+07:00",
+  "sequenceNumber": 1
+}
+
+### List proposed actions
+GET {{host}}/api/conversations/{{conversationId}}/proposed-actions
+
+### Confirm proposed action
+POST {{host}}/api/proposed-actions/{{proposedActionId}}/confirm
+Content-Type: application/json
+
+{
+  "title": "Hospital appointment",
+  "scheduledAt": "2026-07-12T08:00:00+07:00",
+  "location": "Cho Ray Hospital",
+  "recipientEmail": "user@example.com"
+}
+
+### Dashboard
+GET {{host}}/api/dashboard/today

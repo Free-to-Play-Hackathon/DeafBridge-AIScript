@@ -1,0 +1,19 @@
+FROM mcr.microsoft.com/dotnet/sdk:8.0
+
+WORKDIR /src
+
+COPY ["src/Accessibility.Api/Accessibility.Api.csproj", "src/Accessibility.Api/"]
+COPY ["src/Accessibility.Application/Accessibility.Application.csproj", "src/Accessibility.Application/"]
+COPY ["src/Accessibility.Domain/Accessibility.Domain.csproj", "src/Accessibility.Domain/"]
+COPY ["src/Accessibility.Infrastructure/Accessibility.Infrastructure.csproj", "src/Accessibility.Infrastructure/"]
+COPY ["src/Accessibility.Worker/Accessibility.Worker.csproj", "src/Accessibility.Worker/"]
+COPY ["tests/Accessibility.UnitTests/Accessibility.UnitTests.csproj", "tests/Accessibility.UnitTests/"]
+COPY ["tests/Accessibility.IntegrationTests/Accessibility.IntegrationTests.csproj", "tests/Accessibility.IntegrationTests/"]
+
+RUN dotnet restore "tests/Accessibility.UnitTests/Accessibility.UnitTests.csproj" \
+    && dotnet restore "tests/Accessibility.IntegrationTests/Accessibility.IntegrationTests.csproj"
+
+COPY . .
+
+CMD dotnet test "tests/Accessibility.UnitTests/Accessibility.UnitTests.csproj" --no-restore --logger "console;verbosity=normal" \
+    && dotnet test "tests/Accessibility.IntegrationTests/Accessibility.IntegrationTests.csproj" --no-restore --logger "console;verbosity=normal"

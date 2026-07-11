@@ -2,3 +2,10 @@
 __pycache__/
 *.pyc
 temp_audio/
+.env
+.env.*
+!.env.example
+!**/.env.example
+**/bin/
+**/obj/
+**/TestResults/

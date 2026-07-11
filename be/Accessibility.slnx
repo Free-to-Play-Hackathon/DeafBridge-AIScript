@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Accessibility.Api/Accessibility.Api.csproj" />
+    <Project Path="src/Accessibility.Application/Accessibility.Application.csproj" />
+    <Project Path="src/Accessibility.Domain/Accessibility.Domain.csproj" />
+    <Project Path="src/Accessibility.Infrastructure/Accessibility.Infrastructure.csproj" />
+    <Project Path="src/Accessibility.Worker/Accessibility.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Accessibility.IntegrationTests/Accessibility.IntegrationTests.csproj" />
+    <Project Path="tests/Accessibility.UnitTests/Accessibility.UnitTests.csproj" />
+  </Folder>
+</Solution>
