@@ -14,8 +14,8 @@
 // ESP32 chỉ kết nối Wi-Fi 2.4 GHz.
 // =====================================================
 
-const char *WIFI_SSID = "Wifi";
-const char *WIFI_PASSWORD = "niggawhatsmyname";
+const char *WIFI_SSID = "AABW 2";
+const char *WIFI_PASSWORD = "AGENTIC2026";
 
 // Các hàm nằm trong app_httpd.cpp của CameraWebServer.
 void startCameraServer();

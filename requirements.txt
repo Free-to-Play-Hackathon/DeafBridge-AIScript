@@ -1,7 +1,8 @@
-torch
-opencv-python
-mediapipe==0.10.35
-numpy
-flask
-faster-whisper
-pyttsx3
+flask>=3.0,<4
+waitress>=3.0,<4
+numpy>=1.26,<3
+opencv-python>=4.10,<5
+torch>=2.3
+mediapipe>=0.10.14
+faster-whisper>=1.0
+pyttsx3>=2.90
