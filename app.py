@@ -339,14 +339,91 @@ def prepare(sequence,length,mean,std):
     sequence=np.concatenate([sequence,velocity],axis=1)
     return ((sequence-mean)/std).astype(np.float32)
 
-def start_tts_worker():
+def convert_wav_to_32bit_stereo(wav_path):
+    import wave
+    import struct
+    import os
+
+    if not os.path.exists(wav_path):
+        return None
+
+    try:
+        with wave.open(wav_path, "rb") as w:
+            nchannels = w.getnchannels()
+            sampwidth = w.getsampwidth()
+            framerate = w.getframerate()
+            nframes = w.getnframes()
+            frames = w.readframes(nframes)
+
+        if not frames:
+            return None
+
+        # Unpack samples to signed 16-bit
+        samples = []
+        if sampwidth == 2:
+            fmt = f"<{len(frames)//2}h"
+            samples = list(struct.unpack(fmt, frames))
+        elif sampwidth == 1:
+            samples = [int(b - 128) * 256 for b in frames]
+        else:
+            return None
+
+        # Convert stereo to mono
+        if nchannels == 2:
+            samples = [(samples[i] + samples[i+1]) // 2 for i in range(0, len(samples), 2)]
+
+        # Resample to 16000Hz using linear interpolation
+        target_rate = 16000
+        if framerate != target_rate:
+            duration = len(samples) / framerate
+            num_target_samples = int(duration * target_rate)
+            resampled = []
+            for i in range(num_target_samples):
+                pos = i * (len(samples) - 1) / (num_target_samples - 1) if num_target_samples > 1 else 0
+                idx = int(pos)
+                frac = pos - idx
+                if idx + 1 < len(samples):
+                    val = int((1 - frac) * samples[idx] + frac * samples[idx+1])
+                else:
+                    val = samples[idx]
+                resampled.append(val)
+            samples = resampled
+
+        # Convert to 32-bit stereo PCM bytes
+        # Multiply by a volume factor to prevent clipping on the MAX98357
+        volume = 0.5
+        out_bytes = bytearray()
+        for s in samples:
+            s_val = int(s * volume)
+            s_32 = s_val << 16
+            out_bytes.extend(struct.pack("<ii", s_32, s_32))
+
+        return bytes(out_bytes)
+    except Exception as e:
+        logger.warning("Error converting WAV to 32-bit stereo PCM: %s", e)
+        return None
+
+
+def start_tts_worker(camera_source):
     items = queue.Queue()
+
+    # Parse ESP32 IP from camera_source if it's a URL
+    from urllib.parse import urlparse
+    esp_ip = None
+    if isinstance(camera_source, str) and camera_source.startswith("http"):
+        try:
+            parsed = urlparse(camera_source)
+            esp_ip = parsed.hostname
+        except Exception:
+            pass
 
     def worker():
         logger.info("TTS worker starting")
 
         try:
             import pyttsx3
+            import requests
+            import os
 
             engine = pyttsx3.init(driverName="sapi5")
             engine.setProperty("rate", 155)
@@ -381,9 +458,55 @@ def start_tts_worker():
 
                 logger.info("TTS speaking: %s", text)
 
-                engine.stop()
-                engine.say(str(text))
+                # 1. Save to temp WAV file
+                temp_wav = "temp_tts.wav"
+                try:
+                    if os.path.exists(temp_wav):
+                        os.remove(temp_wav)
+                except Exception:
+                    pass
+
+                engine.save_to_file(str(text), temp_wav)
                 engine.runAndWait()
+
+                # 2. Convert to I2S 32-bit stereo format
+                pcm_data = convert_wav_to_32bit_stereo(temp_wav)
+
+                # Clean up immediately
+                try:
+                    if os.path.exists(temp_wav):
+                        os.remove(temp_wav)
+                except Exception:
+                    pass
+
+                # 3. Try playing on ESP32 I2S speaker
+                played_on_esp = False
+                if esp_ip and pcm_data:
+                    play_url = f"http://{esp_ip}/play"
+                    logger.info(
+                        "Sending PCM data (%d bytes) to ESP32: %s",
+                        len(pcm_data),
+                        play_url,
+                    )
+                    try:
+                        resp = requests.post(play_url, data=pcm_data, timeout=5.0)
+                        if resp.status_code == 200:
+                            logger.info("ESP32 speaker played audio successfully")
+                            played_on_esp = True
+                        else:
+                            logger.warning(
+                                "ESP32 speaker failed with code %d",
+                                resp.status_code,
+                            )
+                    except Exception as e:
+                        logger.warning("Failed to send audio to ESP32: %s", e)
+
+                # 4. Fallback to local playback if not played on ESP32
+                if not played_on_esp:
+                    logger.info("Playing audio locally on laptop speaker")
+                    engine.stop()
+                    engine.say(str(text))
+                    engine.runAndWait()
 
                 logger.info("TTS finished: %s", text)
 
@@ -561,7 +684,7 @@ def run_camera(args):
     camera=LatestFrameCamera(source)
     camera.wait_until_connected(args.camera_connect_timeout)
 
-    tts = start_tts_worker()
+    tts = start_tts_worker(args.camera)
     time.sleep(1)
     tts.put("Text to speech is ready")
 
