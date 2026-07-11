@@ -22,6 +22,21 @@ from mediapipe.tasks.python import vision
 HAND_FEATURES = 63
 RAW_FEATURES = 126
 
+HAND_CONNECTIONS = [
+    # Thumb
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    # Index finger
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    # Middle finger
+    (9, 10), (10, 11), (11, 12),
+    # Ring finger
+    (13, 14), (14, 15), (15, 16),
+    # Pinky
+    (0, 17), (17, 18), (18, 19), (19, 20),
+    # Knuckle and palm connections
+    (5, 9), (9, 13), (13, 17), (2, 5)
+]
+
 HTML = """
 <!doctype html>
 <html lang="vi">
@@ -384,8 +399,16 @@ def run_camera(args):
         h,w=frame.shape[:2]
         for landmarks in result.hand_landmarks or []:
             points=[(int(p.x*w),int(p.y*h)) for p in landmarks]
+            
+            # Draw connections (bones)
+            for start_idx, end_idx in HAND_CONNECTIONS:
+                if start_idx < len(points) and end_idx < len(points):
+                    cv2.line(frame, points[start_idx], points[end_idx], (0, 255, 0), 2)
+            
+            # Draw keypoints (joint dots)
             for p in points:
                 cv2.circle(frame,p,4,(255,0,255),-1)
+                
             xs=[p[0] for p in points]
             ys=[p[1] for p in points]
             cv2.rectangle(
