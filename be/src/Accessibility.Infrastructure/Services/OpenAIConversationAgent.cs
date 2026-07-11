@@ -51,12 +51,23 @@ public class OpenAIConversationAgent : IConversationAgent
         var firstResponse = await CreateResponseAsync(apiKey, model, BuildInstructions(), input, tools, cancellationToken);
         var actions = ExecuteToolCalls(firstResponse, input);
 
-        var finalInstructions = BuildInstructions() + "\n\nReturn the final analysis as JSON only. Include no markdown.";
-        var finalResponse = await CreateResponseAsync(apiKey, model, finalInstructions, input, tools, cancellationToken);
+        var finalInstructions = BuildInstructions() + "\n\nIf any backend action is needed and has not been called yet, call the matching tool now. Otherwise return the final analysis as JSON only. Include no markdown.";
+        var secondResponse = await CreateResponseAsync(apiKey, model, finalInstructions, input, tools, cancellationToken);
+        var finalActions = ExecuteToolCalls(secondResponse, input);
+        actions.AddRange(finalActions);
+
+        var finalResponse = secondResponse;
+        if (finalActions.Count > 0)
+        {
+            finalInstructions = BuildInstructions() + "\n\nAll needed backend tools have now been called. Return the final analysis as JSON only. Include no markdown. Do not call any more tools.";
+            finalResponse = await CreateResponseAsync(apiKey, model, finalInstructions, input, tools, cancellationToken);
+        }
+
         var result = ParseFinalResult(finalResponse, actions, model);
         result.RawAgentResponseJson = JsonSerializer.Serialize(new
         {
             firstResponse,
+            secondResponse,
             finalResponse
         }, JsonOptions);
 

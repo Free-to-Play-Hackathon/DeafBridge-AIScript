@@ -104,6 +104,61 @@ public class AgentAndActionTests
     }
 
     [Fact]
+    public async Task OpenAIAgent_ExecutesFunctionCallFromSecondResponse()
+    {
+        var firstResponse = """
+        {
+          "output_text": "{\"detectedLanguage\":\"en\",\"translatedText\":\"Wake up at 10 AM.\",\"summary\":\"The user needs to wake up at 10 AM.\",\"category\":\"Reminder\",\"importance\":\"High\",\"suggestedReplies\":[\"I will remind you.\"]}",
+          "output": []
+        }
+        """;
+        var secondResponse = """
+        {
+          "output": [
+            {
+              "type": "function_call",
+              "call_id": "call_2",
+              "name": "schedule_reminder",
+              "arguments": "{\"title\":\"Wake up\",\"description\":\"Wake up at 10 AM.\",\"scheduledAt\":\"2026-07-12T10:00:00+07:00\",\"dueAt\":null,\"location\":null,\"recipientEmail\":null}"
+            }
+          ]
+        }
+        """;
+        var finalResponse = """
+        {
+          "output_text": "{\"detectedLanguage\":\"en\",\"translatedText\":\"Wake up at 10 AM.\",\"summary\":\"The user asked to wake up at 10 AM.\",\"category\":\"Reminder\",\"importance\":\"High\",\"suggestedReplies\":[\"I will remind you at 10 AM.\"]}",
+          "output": []
+        }
+        """;
+        var httpClientFactory = CreateHttpClientFactory(firstResponse, secondResponse, finalResponse);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["AI_PROVIDER"] = "openai",
+                ["OPENAI_API_KEY"] = "test-key",
+                ["AI_MODEL"] = "gpt-test"
+            })
+            .Build();
+        var agent = new OpenAIConversationAgent(httpClientFactory.Object, configuration, NullLogger<OpenAIConversationAgent>.Instance);
+
+        var result = await agent.AnalyzeAsync(new AgentContext
+        {
+            TranscriptText = "Wake me up at 10 AM.",
+            Speaker = Speaker.HearingUser.ToString(),
+            Timestamp = DateTimeOffset.Parse("2026-07-12T08:00:00+07:00"),
+            UserTimeZone = "Asia/Ho_Chi_Minh"
+        }, CancellationToken.None);
+
+        result.Category.Should().Be(AnalysisCategory.Reminder);
+        result.Actions.Should().ContainSingle(action =>
+            action.Type == ActionType.ScheduleReminder &&
+            action.Title == "Wake up" &&
+            action.ScheduledAt == DateTimeOffset.Parse("2026-07-12T10:00:00+07:00") &&
+            action.RequiresConfirmation);
+        result.RawAgentResponseJson.Should().Contain("secondResponse");
+    }
+
+    [Fact]
     public async Task ConfirmAction_WritesOutboxMessageWithoutPublishingDirectly()
     {
         await using var dbContext = CreateDbContext();
