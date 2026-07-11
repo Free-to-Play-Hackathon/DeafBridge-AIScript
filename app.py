@@ -341,7 +341,7 @@ def run_camera(args):
     hand_model=Path(args.hand_model)
     options=vision.HandLandmarkerOptions(
         base_options=python.BaseOptions(model_asset_path=str(hand_model)),
-        running_mode=vision.RunningMode.IMAGE,
+        running_mode=vision.RunningMode.VIDEO,
         num_hands=2,
         min_hand_detection_confidence=0.30,
         min_hand_presence_confidence=0.30,
@@ -360,6 +360,7 @@ def run_camera(args):
     detected=0
     label="READY"
     confidence=0.0
+    frame_timestamp_ms = 0
 
     while True:
         ok,frame=cap.read()
@@ -367,10 +368,11 @@ def run_camera(args):
             break
 
         rgb=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
-        result=detector.detect(mp.Image(
+        frame_timestamp_ms += 33
+        result=detector.detect_for_video(mp.Image(
             image_format=mp.ImageFormat.SRGB,
             data=rgb
-        ))
+        ), frame_timestamp_ms)
         features=frame_features(result, force_right_hand=not args.no_force_right)
 
         if recording:
